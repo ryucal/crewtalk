@@ -9,6 +9,7 @@ import '../models/message_model.dart';
 import '../providers/app_provider.dart';
 import '../providers/gps_provider.dart';
 import '../services/auth_repository.dart';
+import '../services/chat_firestore_repository.dart';
 import '../services/gps_service.dart';
 import '../utils/app_colors.dart';
 import '../utils/helpers.dart';
@@ -162,35 +163,61 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
     );
   }
 
-  void _handleBroadcast() {
+  Future<void> _handleBroadcast() async {
     final text = _broadcastController.text.trim();
     if (text.isEmpty) return;
     final t = timeNow();
     final d = dateToday();
     final user = ref.read(userProvider)!;
+    final rooms = ref.read(roomProvider);
+    final targets = rooms.where((r) {
+      if (r.adminOnly) return false;
+      if (_broadcastRoomKind != null && r.roomType != _broadcastRoomKind) return false;
+      return _broadcastCompanies.isEmpty ||
+          r.companies.isEmpty ||
+          r.companies.any((c) => _broadcastCompanies.contains(c));
+    }).toList();
 
-    ref.read(roomProvider.notifier).reorder(
-      ref.read(roomProvider).map((r) {
-        if (r.adminOnly) return r;
-        if (_broadcastRoomKind != null && r.roomType != _broadcastRoomKind) return r;
-        final isTarget = _broadcastCompanies.isEmpty ||
-            r.companies.isEmpty ||
-            r.companies.any((c) => _broadcastCompanies.contains(c));
-        return isTarget ? r.copyWith(lastMsg: '📢 $text', time: t) : r;
-      }).toList(),
-    );
-
-    ref.read(messageProvider.notifier).add(MessageModel(
-      id: DateTime.now().millisecondsSinceEpoch,
-      userId: user.phone.isNotEmpty ? user.phone : 'admin',
-      name: user.name,
-      text: text,
-      time: t,
-      date: d,
-      type: MessageType.notice,
-      isMe: true,
-      noticeForRoomType: _broadcastRoomKind,
-    ));
+    if (AuthRepository.firebaseAvailable) {
+      final msg = MessageModel(
+        id: DateTime.now().millisecondsSinceEpoch,
+        userId: outgoingMessageUserId(user),
+        name: user.name,
+        text: text,
+        time: t,
+        date: d,
+        type: MessageType.notice,
+        isMe: true,
+        noticeForRoomType: _broadcastRoomKind,
+      );
+      await ChatFirestoreRepository.broadcastNoticeToRooms(
+        targetRooms: targets,
+        msg: msg,
+        lastPreview: '📢 $text',
+      );
+    } else {
+      ref.read(roomProvider.notifier).reorder(
+        rooms.map((r) {
+          if (r.adminOnly) return r;
+          if (_broadcastRoomKind != null && r.roomType != _broadcastRoomKind) return r;
+          final isTarget = _broadcastCompanies.isEmpty ||
+              r.companies.isEmpty ||
+              r.companies.any((c) => _broadcastCompanies.contains(c));
+          return isTarget ? r.copyWith(lastMsg: '📢 $text', time: t) : r;
+        }).toList(),
+      );
+      ref.read(messageProvider.notifier).add(MessageModel(
+        id: DateTime.now().millisecondsSinceEpoch,
+        userId: user.phone.isNotEmpty ? user.phone : 'admin',
+        name: user.name,
+        text: text,
+        time: t,
+        date: d,
+        type: MessageType.notice,
+        isMe: true,
+        noticeForRoomType: _broadcastRoomKind,
+      ));
+    }
 
     _broadcastController.clear();
     setState(() { _broadcastCompanies = []; _broadcastRoomKind = RoomType.normal; _showBroadcastPopup = false; });
@@ -968,17 +995,27 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
     });
   }
 
-  void _addRoom() {
+  Future<void> _addRoom() async {
     if (_newRoomName.trim().isEmpty) return;
-    ref.read(roomProvider.notifier).add(RoomModel(
-      id: DateTime.now().millisecondsSinceEpoch,
-      name: _newRoomName.trim(),
-      lastMsg: '새 채팅방이 생성됐습니다',
-      time: timeNow(),
-      companies: List.from(_newRoomCompanies),
-      subRoutes: List.from(_newRoomSubRoutes),
-      roomType: _newRoomType,
-    ));
+    if (AuthRepository.firebaseAvailable) {
+      await ChatFirestoreRepository.createRoom(
+        name: _newRoomName.trim(),
+        companies: List.from(_newRoomCompanies),
+        subRoutes: List.from(_newRoomSubRoutes),
+        roomType: _newRoomType,
+        timeLabel: timeNow(),
+      );
+    } else {
+      ref.read(roomProvider.notifier).addLocal(RoomModel(
+        id: DateTime.now().millisecondsSinceEpoch,
+        name: _newRoomName.trim(),
+        lastMsg: '새 채팅방이 생성됐습니다',
+        time: timeNow(),
+        companies: List.from(_newRoomCompanies),
+        subRoutes: List.from(_newRoomSubRoutes),
+        roomType: _newRoomType,
+      ));
+    }
     setState(() {
       _showAddPopup = false;
       _newRoomName = '';

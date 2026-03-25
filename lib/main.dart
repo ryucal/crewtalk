@@ -9,6 +9,7 @@ import 'models/user_model.dart';
 import 'providers/app_provider.dart';
 import 'router/app_router.dart';
 import 'services/auth_repository.dart';
+import 'widgets/firestore_room_sync.dart';
 import 'services/gps_service.dart';
 import 'services/user_session_storage.dart';
 
@@ -37,7 +38,9 @@ Future<void> main() async {
       overrides: [
         userProvider.overrideWith((ref) => UserNotifier(initialUser)),
       ],
-      child: const CrewTalkApp(),
+      child: FirestoreRoomSync(
+        child: const CrewTalkApp(),
+      ),
     ),
   );
 }

@@ -10,6 +10,9 @@ import 'package:photo_view/photo_view_gallery.dart';
 import '../models/message_model.dart';
 import '../models/room_model.dart';
 import '../providers/app_provider.dart';
+import '../providers/chat_streams_provider.dart';
+import '../services/auth_repository.dart';
+import '../services/chat_firestore_repository.dart';
 import '../providers/gps_provider.dart';
 import '../services/gps_service.dart';
 import '../utils/app_colors.dart';
@@ -204,11 +207,22 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   List<MessageModel> _getMessages(RoomModel room) {
     if (room.id == 999) return ref.watch(adminMessageProvider);
     if (room.id == 998) return ref.watch(dbMessageProvider);
-    return ref.watch(messageProvider).where((m) {
-      if (m.type != MessageType.notice) return true;
-      if (m.noticeForRoomType == null) return true;
-      return m.noticeForRoomType == room.roomType;
-    }).toList();
+    if (!AuthRepository.firebaseAvailable) {
+      return ref.watch(messageProvider).where((m) {
+        if (m.type != MessageType.notice) return true;
+        if (m.noticeForRoomType == null) return true;
+        return m.noticeForRoomType == room.roomType;
+      }).toList();
+    }
+    final asyncMsgs = ref.watch(roomMessagesStreamProvider(room.id));
+    return asyncMsgs.maybeWhen(
+      data: (list) => list.where((m) {
+        if (m.type != MessageType.notice) return true;
+        if (m.noticeForRoomType == null) return true;
+        return m.noticeForRoomType == room.roomType;
+      }).toList(),
+      orElse: () => [],
+    );
   }
 
   void _addMessage(RoomModel room, MessageModel msg) {
@@ -216,6 +230,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       ref.read(adminMessageProvider.notifier).upsertSummary(msg);
     } else if (room.id == 998) {
       ref.read(dbMessageProvider.notifier).add(msg);
+    } else if (AuthRepository.firebaseAvailable) {
+      final uid = ref.read(userProvider)?.firebaseUid;
+      final preview = _roomListLastPreview(msg);
+      unawaited(
+        ChatFirestoreRepository.sendMessage(
+          roomDocId: room.id.toString(),
+          msg: msg,
+          myFirebaseUid: uid,
+          lastPreview: preview,
+        ).catchError((Object e, StackTrace st) => debugPrint('sendMessage: $e\n$st')),
+      );
     } else {
       ref.read(messageProvider.notifier).add(msg);
       ref.read(roomProvider.notifier).updateRoom(room.id, (r) => r.copyWith(
@@ -228,7 +253,45 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   void _editMessage(RoomModel room, int id, String newText) {
     if (room.id == 999) return;
     if (room.id == 998) return;
+    if (AuthRepository.firebaseAvailable) {
+      final list = ref.read(roomMessagesStreamProvider(room.id)).asData?.value;
+      MessageModel? found;
+      for (final m in list ?? []) {
+        if (m.id == id) found = m;
+      }
+      final docId = found?.firestoreDocId;
+      if (docId != null) {
+        unawaited(
+          ChatFirestoreRepository.updateMessageText(
+            roomDocId: room.id.toString(),
+            messageDocId: docId,
+            newText: newText,
+          ).catchError((Object e, StackTrace st) => debugPrint('updateMessageText: $e\n$st')),
+        );
+      }
+      return;
+    }
     ref.read(messageProvider.notifier).editText(id, newText);
+  }
+
+  void _deleteMessage(RoomModel room, int id) {
+    if (room.id == 999 || room.id == 998) return;
+    if (AuthRepository.firebaseAvailable) {
+      final list = ref.read(roomMessagesStreamProvider(room.id)).asData?.value;
+      MessageModel? found;
+      for (final m in list ?? []) {
+        if (m.id == id) found = m;
+      }
+      final docId = found?.firestoreDocId;
+      if (docId != null) {
+        unawaited(
+          ChatFirestoreRepository.deleteMessage(room.id.toString(), docId)
+              .catchError((Object e, StackTrace st) => debugPrint('deleteMessage: $e\n$st')),
+        );
+      }
+      return;
+    }
+    ref.read(messageProvider.notifier).remove(id);
   }
 
   void _sendText(RoomModel room, bool isDbRoom) {
@@ -240,7 +303,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     _addMessage(room, MessageModel(
       id: DateTime.now().millisecondsSinceEpoch,
-      userId: 'me',
+      userId: outgoingMessageUserId(user),
       name: user.name,
       avatar: user.avatar,
       car: user.car,
@@ -251,7 +314,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       isMe: true,
     ));
 
-    ref.read(roomProvider.notifier).updateRoom(room.id, (r) => r.copyWith(lastMsg: text, time: t));
+    if (!AuthRepository.firebaseAvailable) {
+      ref.read(roomProvider.notifier).updateRoom(room.id, (r) => r.copyWith(lastMsg: text, time: t));
+    }
     _textController.clear();
     setState(() => _inputText = '');
     _scrollToBottom();
@@ -273,11 +338,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final baseId = DateTime.now().millisecondsSinceEpoch;
 
     for (var i = 0; i < files.length; i++) {
+      var imageUrl = files[i].path;
+      if (AuthRepository.firebaseAvailable && !kIsWeb) {
+        final uploaded = await ChatFirestoreRepository.uploadChatImage(room.id.toString(), imageUrl);
+        if (uploaded != null) imageUrl = uploaded;
+      }
       _addMessage(
         room,
         MessageModel(
           id: baseId + i,
-          userId: 'me',
+          userId: outgoingMessageUserId(user),
           name: user.name,
           avatar: user.avatar,
           car: user.car,
@@ -285,13 +355,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           date: today,
           type: MessageType.image,
           isMe: true,
-          imageUrl: files[i].path,
+          imageUrl: imageUrl,
         ),
       );
     }
 
-    final lastLabel = files.length == 1 ? '📷 사진' : '📷 사진 ${files.length}장';
-    ref.read(roomProvider.notifier).updateRoom(room.id, (r) => r.copyWith(lastMsg: lastLabel, time: t));
+    if (!AuthRepository.firebaseAvailable) {
+      final lastLabel = files.length == 1 ? '📷 사진' : '📷 사진 ${files.length}장';
+      ref.read(roomProvider.notifier).updateRoom(room.id, (r) => r.copyWith(lastMsg: lastLabel, time: t));
+    }
     setState(() {});
     _scrollToBottom();
   }
@@ -302,8 +374,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final isCarQuery = RegExp(r'\d{4}').hasMatch(query);
       final isNameQuery = RegExp(r'^[가-힣]{2,4}$').hasMatch(query.trim());
 
-      final allMessages = ref.read(messageProvider);
-      final reportMsgs = [...allMessages].where((m) => m.type == MessageType.report).toList().reversed.toList();
+      final List<MessageModel> reportMsgs;
+      if (AuthRepository.firebaseAvailable) {
+        reportMsgs = (ref.read(todayReportsStreamProvider).asData?.value ?? const <MessageModel>[])
+            .reversed
+            .toList();
+      } else {
+        reportMsgs = [...ref.read(messageProvider).where((m) => m.type == MessageType.report)].reversed.toList();
+      }
 
       DbResultCard? resultCard;
 
@@ -371,7 +449,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           isMe: false,
         ));
       }
-      ref.read(roomProvider.notifier).updateRoom(room.id, (r) => r.copyWith(lastMsg: '🔍 $query 검색', time: timeNow()));
+      if (!AuthRepository.firebaseAvailable) {
+        ref.read(roomProvider.notifier).updateRoom(room.id, (r) => r.copyWith(lastMsg: '🔍 $query 검색', time: timeNow()));
+      } else {
+        unawaited(
+          ChatFirestoreRepository.patchRoom(room.id.toString(), {
+            'lastMsg': '🔍 $query 검색',
+            'time': timeNow(),
+          }),
+        );
+      }
       _scrollToBottom();
     });
   }
@@ -379,13 +466,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   // ─── 운행 관리 현황 집계 생성 ────────────────────────────────
   void _generateSummary() {
-    final allMessages = ref.read(messageProvider);
     final allRooms = ref.read(roomProvider);
     final today = dateToday();
     final t = timeNow();
 
     final normalRooms = allRooms.where((r) => !r.adminOnly).toList();
-    final reportMsgs = allMessages.where((m) => m.type == MessageType.report && m.date == today).toList();
+    final List<MessageModel> reportMsgs;
+    if (AuthRepository.firebaseAvailable) {
+      reportMsgs = ref.read(todayReportsStreamProvider).asData?.value ?? [];
+    } else {
+      reportMsgs = ref.read(messageProvider).where((m) => m.type == MessageType.report && m.date == today).toList();
+    }
 
     List<SummaryLine> makeLines(String shiftType) {
       return normalRooms.map((room) {
@@ -441,7 +532,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final today = dateToday();
     final msg = MessageModel(
       id: DateTime.now().millisecondsSinceEpoch,
-      userId: 'me',
+      userId: outgoingMessageUserId(user),
       name: user.name,
       phone: user.phone,
       car: user.car,
@@ -463,7 +554,34 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   void _handleReact(RoomModel room, int msgId, String emoji, String userName) {
     if (room.id == 998 || room.id == 999) return;
-    ref.read(messageProvider.notifier).react(msgId, emoji, userName);
+    if (!AuthRepository.firebaseAvailable) {
+      ref.read(messageProvider.notifier).react(msgId, emoji, userName);
+      return;
+    }
+    final list = ref.read(roomMessagesStreamProvider(room.id)).asData?.value;
+    MessageModel? m;
+    for (final x in list ?? []) {
+      if (x.id == msgId) m = x;
+    }
+    final docId = m?.firestoreDocId;
+    if (docId == null || m == null) return;
+    final reactions = Map<String, List<String>>.from(
+      m.reactions.map((k, v) => MapEntry(k, List<String>.from(v))),
+    );
+    final users = reactions[emoji] ?? [];
+    if (users.contains(userName)) {
+      users.remove(userName);
+    } else {
+      users.add(userName);
+    }
+    reactions[emoji] = users;
+    unawaited(
+      ChatFirestoreRepository.updateReactions(
+        roomDocId: room.id.toString(),
+        messageDocId: docId,
+        reactions: reactions,
+      ).catchError((Object e, StackTrace st) => debugPrint('updateReactions: $e\n$st')),
+    );
   }
 
   @override
@@ -496,11 +614,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     // 운행 관리 현황: 입장 시 및 보고 메시지 변경 시 자동 집계
     if (isAdminRoom) {
-      ref.listen(messageProvider, (prev, next) {
-        if (prev?.length != next.length || prev != next) {
+      if (AuthRepository.firebaseAvailable) {
+        ref.listen(todayReportsStreamProvider, (_, __) {
           WidgetsBinding.instance.addPostFrameCallback((_) => _generateSummary());
-        }
-      });
+        });
+      } else {
+        ref.listen(messageProvider, (prev, next) {
+          if (prev?.length != next.length || prev != next) {
+            WidgetsBinding.instance.addPostFrameCallback((_) => _generateSummary());
+          }
+        });
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) => _generateSummary());
     }
 
@@ -667,7 +791,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               isAdmin: isAdmin,
               currentUser: user.name,
               onEdit: (id, newText) => _editMessage(room, id, newText),
-              onDelete: (id) => ref.read(messageProvider.notifier).remove(id),
+              onDelete: (id) => _deleteMessage(room, id),
               onReact: (id, emoji, userName) => _handleReact(room, id, emoji, userName),
               onOpenGallery: (imageUrl) {
                 if (allImages.isEmpty) return;
@@ -780,7 +904,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final eveningTotal = todayReports.where((m) => m.reportData?.type == '퇴근').fold(0, (s, m) => s + (m.reportData?.count ?? 0));
 
     // 내 보고 내역: 전체 채팅방에서 오늘 내가 보낸 report (최신순)
-    final allMyReports = ref.watch(messageProvider)
+    final source = AuthRepository.firebaseAvailable
+        ? (ref.watch(todayReportsStreamProvider).asData?.value ?? [])
+        : ref.watch(messageProvider);
+    final allMyReports = source
         .where((m) => m.type == MessageType.report && m.date == today && m.name == user.name)
         .toList()
         .reversed
@@ -1407,7 +1534,7 @@ class _NormalReportPanelState extends ConsumerState<_NormalReportPanel> {
     final today = dateToday();
     final msg = MessageModel(
       id: DateTime.now().millisecondsSinceEpoch,
-      userId: 'me',
+      userId: outgoingMessageUserId(user),
       name: user.name,
       car: user.car,
       route: widget.room.name,
@@ -1968,7 +2095,7 @@ class _VendorReportPanelState extends ConsumerState<_VendorReportPanel> {
     final today = dateToday();
     final msg = MessageModel(
       id: DateTime.now().millisecondsSinceEpoch,
-      userId: 'me',
+      userId: outgoingMessageUserId(user),
       name: user.name,
       car: user.car,
       time: t,

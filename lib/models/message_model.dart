@@ -128,6 +128,9 @@ class MessageModel {
   /// 전체 공지(`notice`)만 사용. null이면 일반·솔라티 모든 채팅방에 표시, 값이 있으면 해당 `RoomType` 채팅방에만 표시.
   final RoomType? noticeForRoomType;
 
+  /// `rooms/{roomId}/messages/{docId}` 문서 ID (Firestore 연동 시)
+  final String? firestoreDocId;
+
   const MessageModel({
     required this.id,
     required this.userId,
@@ -155,11 +158,13 @@ class MessageModel {
     this.unreported,
     this.emoji,
     this.noticeForRoomType,
+    this.firestoreDocId,
   });
 
   MessageModel copyWith({
     String? text,
     Map<String, List<String>>? reactions,
+    String? firestoreDocId,
   }) {
     return MessageModel(
       id: id,
@@ -188,6 +193,7 @@ class MessageModel {
       unreported: unreported,
       emoji: emoji,
       noticeForRoomType: noticeForRoomType,
+      firestoreDocId: firestoreDocId ?? this.firestoreDocId,
     );
   }
 }

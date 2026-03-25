@@ -1,5 +1,11 @@
 import 'package:intl/intl.dart';
 
+import '../models/user_model.dart';
+
+/// Firestore 등에 저장할 발신자 식별자 (로그인 UID 우선)
+String outgoingMessageUserId(UserModel u) =>
+    u.firebaseUid ?? 'phone_${u.phone.replaceAll(RegExp(r'\D'), '')}';
+
 String timeNow() {
   final now = DateTime.now();
   return DateFormat('HH:mm').format(now);
