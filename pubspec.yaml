@@ -43,6 +43,10 @@ dependencies:
   geolocator: ^14.0.2
   flutter_foreground_task: ^9.2.1
   photo_view: ^0.15.0
+  firebase_core: ^4.6.0
+  firebase_auth: ^6.3.0
+  cloud_firestore: ^6.2.0
+  cloud_functions: ^6.1.0
 
 dev_dependencies:
   flutter_test:

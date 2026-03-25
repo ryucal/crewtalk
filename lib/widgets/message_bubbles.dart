@@ -686,121 +686,267 @@ class _MessageBubbleState extends State<MessageBubble> {
     );
   }
 
-  // ─── 7. DB 검색 결과 ─────────────────────────────────────────
+  // ─── 7. DB 검색 결과 (기사·차량) ─────────────────────────────
   Widget _buildDbResult() {
     final r = msg.resultCard;
     if (r == null) return const SizedBox.shrink();
 
-    final shiftColor = r.reportData?.type == '출근' ? AppColors.morningBlue
-        : r.reportData?.type == '퇴근' ? AppColors.eveningRed : const Color(0xFF555555);
-    final shiftBg = r.reportData?.type == '출근' ? AppColors.morningBlueBg
-        : r.reportData?.type == '퇴근' ? AppColors.eveningRedBg : const Color(0xFFF5F5F5);
+    final isNameSearch = r.searchType == 'name';
+    final shiftColor = r.reportData?.type == '출근'
+        ? AppColors.morningBlue
+        : r.reportData?.type == '퇴근'
+            ? AppColors.eveningRed
+            : const Color(0xFF64748B);
+    final shiftBg = r.reportData?.type == '출근'
+        ? AppColors.morningBlueBg
+        : r.reportData?.type == '퇴근'
+            ? AppColors.eveningRedBg
+            : const Color(0xFFF1F5F9);
 
     final dtShort = shortDateTime(r.reportDateTime);
+    const labelStyle = TextStyle(
+      fontSize: 12,
+      fontWeight: FontWeight.w600,
+      color: Color(0xFF64748B),
+      height: 1.25,
+    );
+    const dividerColor = Color(0xFFF1F5F9);
 
-    Widget infoRow(String label, String value, {bool isPhone = false, bool isHighlight = false, bool isNote = false}) {
-      return Container(
-        padding: const EdgeInsets.symmetric(vertical: 7),
-        decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Color(0xFFF5F5F5)))),
-        child: Row(
-          children: [
-            SizedBox(width: 62, child: Text(label, style: const TextStyle(fontSize: 11, color: AppColors.textLight, fontWeight: FontWeight.w600, letterSpacing: 0.3))),
-            const SizedBox(width: 8),
-            Expanded(
-              child: isPhone
-                  ? GestureDetector(
-                      onTap: () {},
-                      child: Text(value, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.morningBlue)),
-                    )
-                  : isNote
-                  ? Text('⚠️ $value', style: const TextStyle(fontSize: 13, color: AppColors.warning, fontWeight: FontWeight.w600))
-                  : Text(value, style: TextStyle(fontSize: 14, fontWeight: isHighlight ? FontWeight.w700 : FontWeight.w500, color: isHighlight ? Colors.black : const Color(0xFF444444))),
+    Widget infoRow(String label, String value,
+        {bool isPhone = false, bool isHighlight = false, bool isNote = false, bool showDivider = true}) {
+      final hasNote = isNote && value.isNotEmpty;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(width: 76, child: Text(label, style: labelStyle)),
+                Expanded(
+                  child: isPhone
+                      ? GestureDetector(
+                          onTap: () {},
+                          child: Row(
+                            children: [
+                              Icon(Icons.phone_rounded, size: 17, color: AppColors.morningBlue.withValues(alpha: 0.9)),
+                              const SizedBox(width: 6),
+                              Flexible(
+                                child: Text(
+                                  value,
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w700,
+                                    color: AppColors.morningBlue,
+                                    height: 1.3,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      : hasNote
+                          ? Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFFF8E6),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: AppColors.warning.withValues(alpha: 0.25)),
+                              ),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Icon(Icons.info_outline_rounded, size: 18, color: AppColors.warning.withValues(alpha: 0.9)),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      value,
+                                      style: const TextStyle(fontSize: 14, color: Color(0xFFB45309), fontWeight: FontWeight.w600, height: 1.35),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : Text(
+                              value,
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: isHighlight ? FontWeight.w700 : FontWeight.w500,
+                                color: isHighlight ? const Color(0xFF0F172A) : const Color(0xFF334155),
+                                height: 1.35,
+                              ),
+                            ),
+                ),
+              ],
             ),
-          ],
-        ),
+          ),
+          if (showDivider) const Divider(height: 1, thickness: 1, color: dividerColor, indent: 16, endIndent: 16),
+        ],
       );
     }
 
     Widget routeRow() {
-      return Container(
-        padding: const EdgeInsets.symmetric(vertical: 7),
-        decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Color(0xFFF5F5F5)))),
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const SizedBox(width: 62, child: Text('노선', style: TextStyle(fontSize: 11, color: AppColors.textLight, fontWeight: FontWeight.w600, letterSpacing: 0.3))),
-            const SizedBox(width: 8),
+            const SizedBox(width: 76, child: Text('노선', style: labelStyle)),
             Expanded(
               child: r.route != null
-                  ? Wrap(
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      spacing: 4,
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(r.subRoute != null ? '${r.route} · ${r.subRoute}' : r.route!, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.black)),
-                        if (dtShort.isNotEmpty && r.reportData != null) Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 2),
-                          decoration: BoxDecoration(color: shiftBg, borderRadius: BorderRadius.circular(20)),
-                          child: Text('$dtShort ${r.reportData!.type} ${r.reportData!.count}명',
-                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: shiftColor)),
+                        Text(
+                          r.subRoute != null ? '${r.route} · ${r.subRoute}' : r.route!,
+                          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Color(0xFF0F172A), height: 1.3),
                         ),
-                        if (dtShort.isEmpty) const Text('(미보고)', style: TextStyle(fontSize: 11, color: AppColors.textLight)),
+                        if (dtShort.isNotEmpty && r.reportData != null) ...[
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+                            decoration: BoxDecoration(
+                              color: shiftBg,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: shiftColor.withValues(alpha: 0.22)),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.schedule_rounded, size: 16, color: shiftColor),
+                                const SizedBox(width: 6),
+                                Flexible(
+                                  child: Text(
+                                    '$dtShort ${r.reportData!.type} ${r.reportData!.count}명',
+                                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: shiftColor, height: 1.2),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ] else
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Text(
+                              '당일 인원 보고 없음',
+                              style: TextStyle(fontSize: 13, color: Colors.black.withValues(alpha: 0.38), fontWeight: FontWeight.w500),
+                            ),
+                          ),
                       ],
                     )
-                  : const Text('미보고', style: TextStyle(color: AppColors.textLight)),
+                  : Text(
+                      '미보고',
+                      style: TextStyle(fontSize: 15, color: Colors.black.withValues(alpha: 0.38), fontWeight: FontWeight.w500),
+                    ),
             ),
           ],
         ),
       );
     }
 
+    final title = isNameSearch ? (r.name ?? '') : (r.car ?? '차량 정보');
+    final subtitle = isNameSearch ? '기사 정보' : '차량 · 기사 연계';
+
+    final bodyChildren = isNameSearch
+        ? <Widget>[
+            infoRow('이름', r.name ?? '', isHighlight: true),
+            infoRow('전화번호', r.phone ?? '미등록', isPhone: (r.phone ?? '미등록') != '미등록'),
+            infoRow('소속', r.company ?? '미등록'),
+            infoRow('차량번호', r.car ?? '미보고', isHighlight: r.car != null),
+            const Divider(height: 1, thickness: 1, color: dividerColor, indent: 16, endIndent: 16),
+            routeRow(),
+            infoRow(
+              '기타사항',
+              (r.specialNote != null && r.specialNote!.trim().isNotEmpty) ? r.specialNote!.trim() : '등록된 특이사항 없음',
+              isNote: r.specialNote != null && r.specialNote!.trim().isNotEmpty,
+              showDivider: false,
+            ),
+          ]
+        : <Widget>[
+            infoRow('차량번호', r.car ?? '미확인', isHighlight: true),
+            infoRow('이름', r.name ?? '미확인', isHighlight: r.name != null),
+            infoRow('전화번호', r.phone ?? '미등록', isPhone: (r.phone ?? '미등록') != '미등록'),
+            infoRow('소속', r.company ?? '미등록'),
+            const Divider(height: 1, thickness: 1, color: dividerColor, indent: 16, endIndent: 16),
+            routeRow(),
+            infoRow(
+              '기타사항',
+              (r.specialNote != null && r.specialNote!.trim().isNotEmpty) ? r.specialNote!.trim() : '등록된 특이사항 없음',
+              isNote: r.specialNote != null && r.specialNote!.trim().isNotEmpty,
+              showDivider: false,
+            ),
+          ];
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
       child: Container(
+        clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: const [BoxShadow(color: Color(0x1A000000), blurRadius: 16, offset: Offset(0, 2))],
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: const Color(0xFFE2E8F0)),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF0F172A).withValues(alpha: 0.06),
+              blurRadius: 24,
+              offset: const Offset(0, 10),
+            ),
+          ],
         ),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
-              decoration: const BoxDecoration(
-                color: AppColors.adminIndigo,
-                borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-              ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
               child: Row(
                 children: [
-                  Text(r.searchType == 'name' ? '👤' : '🚌', style: const TextStyle(fontSize: 15)),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      r.searchType == 'name' ? (r.name ?? '') : (r.car ?? '차량 정보'),
-                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: Colors.white),
+                  Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: AppColors.adminIndigoBg,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Icon(
+                      isNameSearch ? Icons.person_rounded : Icons.directions_bus_filled_rounded,
+                      color: AppColors.adminIndigo,
+                      size: 26,
                     ),
                   ),
-                  Text(msg.time, style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, height: 1.2, color: Color(0xFF0F172A), letterSpacing: -0.3),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          subtitle,
+                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.black.withValues(alpha: 0.42)),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF1F5F9),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      msg.time,
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF64748B)),
+                    ),
+                  ),
                 ],
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-              child: r.searchType == 'name' ? Column(children: [
-                infoRow('이름', r.name ?? '', isHighlight: true),
-                infoRow('전화번호', r.phone ?? '미등록', isPhone: (r.phone ?? '미등록') != '미등록'),
-                infoRow('소속', r.company ?? '미등록'),
-                infoRow('차량번호', r.car ?? '미보고', isHighlight: r.car != null),
-                routeRow(),
-                infoRow('기타사항', r.specialNote ?? '없음', isNote: r.specialNote != null && r.specialNote!.isNotEmpty),
-              ]) : Column(children: [
-                infoRow('차량번호', r.car ?? '미확인', isHighlight: true),
-                infoRow('이름', r.name ?? '미확인', isHighlight: r.name != null),
-                infoRow('전화번호', r.phone ?? '미등록', isPhone: (r.phone ?? '미등록') != '미등록'),
-                infoRow('소속', r.company ?? '미등록'),
-                routeRow(),
-                infoRow('기타사항', r.specialNote ?? '없음', isNote: r.specialNote != null && r.specialNote!.isNotEmpty),
-              ]),
-            ),
+            Container(height: 1, color: dividerColor),
+            Padding(padding: const EdgeInsets.only(top: 4, bottom: 14), child: Column(children: bodyChildren)),
           ],
         ),
       ),
@@ -813,138 +959,279 @@ class _MessageBubbleState extends State<MessageBubble> {
     final eveningLines = msg.eveningLines ?? [];
     bool copied = false;
 
+    const dividerColor = Color(0xFFF1F5F9);
+
+    Widget shiftPill({required bool reported, required bool morning, required int total}) {
+      final color = morning ? AppColors.morningBlue : AppColors.eveningRed;
+      final bg = morning ? AppColors.morningBlueBg : AppColors.eveningRedBg;
+      if (reported) {
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: color.withValues(alpha: 0.2)),
+          ),
+          child: Text(
+            '${morning ? '출근' : '퇴근'} $total명',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: color, height: 1.1),
+          ),
+        );
+      }
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF1F5F9),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: const Color(0xFFE2E8F0)),
+        ),
+        child: Text(
+          '${morning ? '출근' : '퇴근'} 미보고',
+          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.black.withValues(alpha: 0.38), height: 1.1),
+        ),
+      );
+    }
+
     return StatefulBuilder(builder: (context, setSt) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
         child: Container(
+          clipBehavior: Clip.antiAlias,
           decoration: BoxDecoration(
             color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            boxShadow: const [BoxShadow(color: Color(0x1A000000), blurRadius: 16, offset: Offset(0, 4))],
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFF0F172A).withValues(alpha: 0.06),
+                blurRadius: 24,
+                offset: const Offset(0, 10),
+              ),
+            ],
           ),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                padding: const EdgeInsets.fromLTRB(16, 16, 12, 14),
                 child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(msg.emoji ?? '📊', style: const TextStyle(fontSize: 18)),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: RichText(text: TextSpan(
-                        children: [
-                          TextSpan(text: '${msg.date} 운행 집계', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w900, color: Colors.black)),
-                          TextSpan(text: '  · ${msg.time} 자동 생성', style: const TextStyle(fontSize: 11, color: AppColors.textHint, fontWeight: FontWeight.w400)),
-                        ],
-                      )),
+                    Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        color: AppColors.adminIndigoBg,
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(msg.emoji ?? '📊', style: const TextStyle(fontSize: 22)),
                     ),
-                    GestureDetector(
-                      onTap: () {
-                        final lines = <String>[];
-                        lines.add('📊 ${msg.date} 운행 집계 (${msg.time})');
-                        lines.add('─────────────────────');
-                        for (var i = 0; i < morningLines.length; i++) {
-                          final line = morningLines[i];
-                          final eve = i < eveningLines.length ? eveningLines[i] : null;
-                          if (line.subLines.isNotEmpty) {
-                            lines.add(line.name);
-                            for (var si = 0; si < line.subLines.length; si++) {
-                              final sub = line.subLines[si];
-                              final eveSub = eve != null && si < eve.subLines.length ? eve.subLines[si] : null;
-                              lines.add('  └ ${sub.name}  ${sub.reported ? '출근 ${sub.total}명' : '출근 미보고'} | ${eveSub?.reported == true ? '퇴근 ${eveSub!.total}명' : '퇴근 미보고'}');
-                            }
-                          } else {
-                            lines.add('${line.name}  ${line.reported ? '출근 ${line.total}명' : '출근 미보고'} | ${eve?.reported == true ? '퇴근 ${eve!.total}명' : '퇴근 미보고'}');
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${msg.date} 운행 집계',
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w800,
+                              height: 1.2,
+                              color: Color(0xFF0F172A),
+                              letterSpacing: -0.3,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            '${msg.time} · 자동 생성',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.black.withValues(alpha: 0.42),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Material(
+                      color: const Color(0xFFF1F5F9),
+                      borderRadius: BorderRadius.circular(12),
+                      child: InkWell(
+                        onTap: () {
+                          // 붙여넣기 시 줄바꿈이 유지되도록: ASCII만·짧은 줄·공백 구분 (카카오톡 등 메시지 입력창 호환)
+                          String pairMorningEvening(SummaryLine m, SummaryLine? e) {
+                            final am = m.reported ? '출근 ${m.total}명' : '출근 미보고';
+                            final pm = e?.reported == true ? '퇴근 ${e!.total}명' : '퇴근 미보고';
+                            return '$am $pm';
                           }
-                        }
-                        lines.add('─────────────────────');
-                        lines.add('합계  출근 ${msg.morningTotal}명 | 퇴근 ${msg.eveningTotal}명');
-                        Clipboard.setData(ClipboardData(text: lines.join('\n')));
-                        setSt(() => copied = true);
-                        Future.delayed(const Duration(seconds: 2), () { if (mounted) setSt(() => copied = false); });
-                      },
-                      child: Icon(copied ? Icons.check : Icons.copy_outlined,
-                        size: 18, color: copied ? const Color(0xFF2E7D32) : AppColors.textLight),
+
+                          String pairSub(SummaryLine sub, SummaryLine? eveSub) {
+                            final am = sub.reported ? '출근 ${sub.total}명' : '출근 미보고';
+                            final pm = eveSub?.reported == true ? '퇴근 ${eveSub!.total}명' : '퇴근 미보고';
+                            return '$am $pm';
+                          }
+
+                          final buf = StringBuffer();
+                          buf.writeln('${msg.date} 운행집계 (${msg.time})');
+                          for (var i = 0; i < morningLines.length; i++) {
+                            final line = morningLines[i];
+                            final eve = i < eveningLines.length ? eveningLines[i] : null;
+                            if (line.subLines.isNotEmpty) {
+                              for (var si = 0; si < line.subLines.length; si++) {
+                                final sub = line.subLines[si];
+                                final eveSub = eve != null && si < eve.subLines.length ? eve.subLines[si] : null;
+                                buf.writeln('${line.name} ${sub.name} ${pairSub(sub, eveSub)}');
+                              }
+                            } else {
+                              buf.writeln('${line.name} ${pairMorningEvening(line, eve)}');
+                            }
+                          }
+                          buf.writeln('합계 출근 ${msg.morningTotal}명 퇴근 ${msg.eveningTotal}명');
+                          Clipboard.setData(ClipboardData(text: buf.toString().trimRight()));
+                          setSt(() => copied = true);
+                          Future.delayed(const Duration(seconds: 2), () {
+                            if (mounted) setSt(() => copied = false);
+                          });
+                        },
+                        borderRadius: BorderRadius.circular(12),
+                        child: Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: Icon(
+                            copied ? Icons.check_rounded : Icons.copy_rounded,
+                            size: 20,
+                            color: copied ? const Color(0xFF15803D) : const Color(0xFF64748B),
+                          ),
+                        ),
+                      ),
                     ),
                   ],
                 ),
               ),
-              const Divider(height: 1, color: Color(0xFFF0F0F0)),
+              const Divider(height: 1, thickness: 1, color: dividerColor),
               ...morningLines.asMap().entries.map((entry) {
                 final i = entry.key;
                 final line = entry.value;
                 final eve = i < eveningLines.length ? eveningLines[i] : null;
                 final unreported = !line.reported && !(eve?.reported ?? false);
                 final hasSubLines = line.subLines.isNotEmpty;
-                return Container(
-                  decoration: BoxDecoration(border: i < morningLines.length - 1 ? const Border(bottom: BorderSide(color: Color(0xFFF5F5F5))) : null),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Padding(
-                        padding: EdgeInsets.fromLTRB(16, hasSubLines ? 10 : 10, 16, hasSubLines ? 4 : 10),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(line.name, style: TextStyle(fontSize: 14, fontWeight: unreported ? FontWeight.w700 : FontWeight.w600, color: unreported ? AppColors.eveningRed : const Color(0xFF333333))),
-                            if (!hasSubLines) Row(children: [
-                              line.reported
-                                  ? Text('출근 ${line.total}명', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.morningBlue))
-                                  : const Text('출근 미보고', style: TextStyle(fontSize: 12, color: AppColors.textHint)),
-                              const Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Text('|', style: TextStyle(color: Color(0xFFDDDDDD)))),
-                              eve?.reported == true
-                                  ? Text('퇴근 ${eve!.total}명', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.eveningRed))
-                                  : const Text('퇴근 미보고', style: TextStyle(fontSize: 12, color: AppColors.textHint)),
-                            ]),
-                          ],
-                        ),
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Padding(
+                      padding: EdgeInsets.fromLTRB(16, hasSubLines ? 12 : 12, 16, hasSubLines ? 6 : 12),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            width: 3,
+                            margin: const EdgeInsets.only(top: 4, right: 10),
+                            height: 16,
+                            decoration: BoxDecoration(
+                              color: unreported ? AppColors.eveningRed.withValues(alpha: 0.65) : AppColors.morningBlue.withValues(alpha: 0.35),
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          ),
+                          Expanded(
+                            child: Text(
+                              line.name,
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: unreported ? FontWeight.w800 : FontWeight.w700,
+                                color: unreported ? AppColors.eveningRed : const Color(0xFF0F172A),
+                                height: 1.25,
+                              ),
+                            ),
+                          ),
+                          if (!hasSubLines)
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 6,
+                              alignment: WrapAlignment.end,
+                              children: [
+                                shiftPill(reported: line.reported, morning: true, total: line.total),
+                                shiftPill(reported: eve?.reported == true, morning: false, total: eve?.total ?? 0),
+                              ],
+                            ),
+                        ],
                       ),
-                      if (hasSubLines) ...line.subLines.asMap().entries.map((se) {
-                        final sub = se.value;
-                        final eveSub = eve != null && se.key < eve.subLines.length ? eve.subLines[se.key] : null;
-                        final subUnreported = !sub.reported && !(eveSub?.reported ?? false);
-                        return Container(
-                          color: subUnreported ? const Color(0x08C62828) : const Color(0xFFFAFAFA),
-                          padding: const EdgeInsets.fromLTRB(28, 6, 16, 6),
+                    ),
+                    if (hasSubLines) ...line.subLines.asMap().entries.map((se) {
+                      final sub = se.value;
+                      final eveSub = eve != null && se.key < eve.subLines.length ? eve.subLines[se.key] : null;
+                      final subUnreported = !sub.reported && !(eveSub?.reported ?? false);
+                      return Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                        child: Container(
+                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                          decoration: BoxDecoration(
+                            color: subUnreported ? const Color(0xFFFFF5F5) : const Color(0xFFF8FAFC),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: subUnreported ? AppColors.eveningRed.withValues(alpha: 0.12) : const Color(0xFFEEF2F6),
+                            ),
+                          ),
                           child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Row(children: [
-                                const Text('└ ', style: TextStyle(fontSize: 11, color: AppColors.textLight)),
-                                Text(sub.name, style: TextStyle(fontSize: 13, fontWeight: subUnreported ? FontWeight.w600 : FontWeight.w400, color: subUnreported ? AppColors.eveningRed : const Color(0xFF555555))),
-                              ]),
-                              Row(children: [
-                                sub.reported
-                                    ? Text('출근 ${sub.total}명', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.morningBlue))
-                                    : const Text('출근 미보고', style: TextStyle(fontSize: 11, color: AppColors.textHint)),
-                                const Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Text('|', style: TextStyle(color: Color(0xFFDDDDDD)))),
-                                eveSub?.reported == true
-                                    ? Text('퇴근 ${eveSub!.total}명', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.eveningRed))
-                                    : const Text('퇴근 미보고', style: TextStyle(fontSize: 11, color: AppColors.textHint)),
-                              ]),
+                              Icon(Icons.subdirectory_arrow_right_rounded, size: 18, color: Colors.black.withValues(alpha: 0.28)),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  sub.name,
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: subUnreported ? FontWeight.w700 : FontWeight.w600,
+                                    color: subUnreported ? AppColors.eveningRed : const Color(0xFF334155),
+                                    height: 1.25,
+                                  ),
+                                ),
+                              ),
+                              Wrap(
+                                spacing: 6,
+                                runSpacing: 6,
+                                alignment: WrapAlignment.end,
+                                children: [
+                                  shiftPill(reported: sub.reported, morning: true, total: sub.total),
+                                  shiftPill(reported: eveSub?.reported == true, morning: false, total: eveSub?.total ?? 0),
+                                ],
+                              ),
                             ],
                           ),
-                        );
-                      }),
-                    ],
-                  ),
+                        ),
+                      );
+                    }),
+                    if (i < morningLines.length - 1)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 16),
+                        child: Divider(height: 1, thickness: 1, color: dividerColor),
+                      ),
+                  ],
                 );
               }),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                decoration: const BoxDecoration(border: Border(top: BorderSide(color: Color(0xFFF0F0F0)))),
+                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                decoration: const BoxDecoration(
+                  color: Color(0xFFF8FAFC),
+                  border: Border(top: BorderSide(color: dividerColor)),
+                ),
                 child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    (msg.unreported ?? 0) > 0
-                        ? Text('⚠️ 미보고 ${msg.unreported}개 노선', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.eveningRed))
-                        : const Text('✅ 전 노선 보고 완료', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF2E7D32))),
-                    Row(children: [
-                      Text('출근 ${msg.morningTotal}명', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.morningBlue)),
-                      const Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Text('|', style: TextStyle(color: Color(0xFFDDDDDD)))),
-                      Text('퇴근 ${msg.eveningTotal}명', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.eveningRed)),
-                    ]),
+                    Text(
+                      '출근 ${msg.morningTotal}명',
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.morningBlue, letterSpacing: -0.2),
+                    ),
+                    Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 14),
+                      width: 1,
+                      height: 18,
+                      color: const Color(0xFFCBD5E1),
+                    ),
+                    Text(
+                      '퇴근 ${msg.eveningTotal}명',
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.eveningRed, letterSpacing: -0.2),
+                    ),
                   ],
                 ),
               ),

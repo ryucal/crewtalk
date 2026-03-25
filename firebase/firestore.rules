@@ -1,0 +1,40 @@
+rules_version = '2';
+
+// 배포: firebase deploy --only firestore:rules
+//
+// 컬렉션 요약
+// - users/{uid}           기사 프로필 (본인만 읽기/쓰기, isAdmin 필드는 클라이언트에서 변경 불가)
+// - company_profiles/{id} 회원가입·로그인용 소속 목록 (이름만, 공개 읽기)
+// - company_private/{id}  소속 로그인 비밀번호 (클라이언트 접근 불가 → Functions만 사용)
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /users/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+
+      // 회원가입 시 본인 문서 생성 (관리자 플래그는 false만 허용)
+      allow create: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.isAdmin == false;
+
+      // 본인 정보 수정 — isAdmin·company·phoneDigits 는 앱에서 바꾸지 못하게 고정
+      allow update: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.isAdmin == resource.data.isAdmin
+        && request.resource.data.company == resource.data.company
+        && request.resource.data.phoneDigits == resource.data.phoneDigits;
+
+      allow delete: if request.auth != null && request.auth.uid == userId;
+    }
+
+    match /company_profiles/{id} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /company_private/{id} {
+      allow read, write: if false;
+    }
+  }
+}

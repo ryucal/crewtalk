@@ -18,6 +18,37 @@ import '../utils/sample_data.dart';
 import '../widgets/message_bubbles.dart';
 import '../widgets/timetable_image.dart';
 
+/// 채팅방 목록 미리보기 문자열 (텍스트 외 타입은 한 줄 요약)
+String _roomListLastPreview(MessageModel msg) {
+  switch (msg.type) {
+    case MessageType.text:
+      return msg.text ?? '';
+    case MessageType.report:
+      final rd = msg.reportData;
+      if (rd == null) return '${msg.name} 인원보고';
+      final routePart = (msg.subRoute != null && msg.subRoute!.isNotEmpty)
+          ? '${msg.route} · ${msg.subRoute}'
+          : (msg.route ?? '');
+      final car = msg.car ?? '';
+      return '${msg.name}  $car  $routePart  ${rd.type} ${rd.count}명';
+    case MessageType.vendorReport:
+      final v = msg.vendorData;
+      if (v == null) return '${msg.name} 솔라티 보고';
+      final tail = v.passengerCount.trim().isEmpty ? '' : ' ${v.passengerCount}명';
+      return '${msg.name}  ${v.company}  ${v.departure}→${v.destination}$tail';
+    case MessageType.image:
+      return '📷 사진';
+    case MessageType.emergency:
+      return '🚨 ${msg.emergencyType ?? '긴급 호출'}';
+    case MessageType.notice:
+      return '📢 ${msg.text ?? ''}';
+    case MessageType.dbResult:
+      return '🔍 검색 결과';
+    case MessageType.summary:
+      return '📊 ${msg.date} 운행 집계';
+  }
+}
+
 class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({super.key});
 
@@ -42,9 +73,112 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   String _inputText = '';
 
+  /// 방별 스크롤 offset (메모리 + SharedPreferences 백업)
+  static const _scrollPrefPrefix = 'chat_scroll_offset_';
+  static const _nearBottomPx = 120.0;
+
+  final Map<int, double> _scrollOffsetMemory = {};
+  final Map<int, int> _messageLenByRoom = {};
+  int? _activeChatRoomId;
+  int? _pendingRestoreRoomId;
+  bool _suppressNextAutoFollow = false;
+  int _scrollMaintenanceGeneration = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScrollPositionChanged);
+  }
+
+  void _onScrollPositionChanged() {
+    final id = _activeChatRoomId;
+    if (id == null || !_scrollController.hasClients) return;
+    _scrollOffsetMemory[id] = _scrollController.offset;
+  }
+
+  void _persistScrollForRoom(int roomId) {
+    if (!_scrollController.hasClients) return;
+    final p = _scrollController.position;
+    if (!p.hasContentDimensions) return;
+    final max = p.maxScrollExtent;
+    final o = _scrollController.offset.clamp(0.0, max);
+    _scrollOffsetMemory[roomId] = o;
+    SharedPreferences.getInstance().then((sp) => sp.setDouble('$_scrollPrefPrefix$roomId', o));
+  }
+
+  bool _isNearBottom() {
+    if (!_scrollController.hasClients) return true;
+    final p = _scrollController.position;
+    if (!p.hasContentDimensions) return true;
+    return p.maxScrollExtent - p.pixels <= _nearBottomPx;
+  }
+
+  Future<void> _restoreScrollForRoom(int roomId, int messageCount) async {
+    final sp = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    final disk = sp.getDouble('$_scrollPrefPrefix$roomId');
+    final saved = _scrollOffsetMemory[roomId] ?? disk;
+
+    void apply([int attempt = 0]) {
+      if (!mounted || !_scrollController.hasClients) return;
+      if (_activeChatRoomId != roomId) return;
+      final p = _scrollController.position;
+      if (!p.hasContentDimensions) {
+        if (attempt < 10) {
+          WidgetsBinding.instance.addPostFrameCallback((_) => apply(attempt + 1));
+        } else {
+          _messageLenByRoom[roomId] = messageCount;
+          _suppressNextAutoFollow = true;
+        }
+        return;
+      }
+      final max = p.maxScrollExtent;
+      if (saved == null) {
+        _scrollController.jumpTo(max);
+      } else {
+        _scrollController.jumpTo(saved.clamp(0.0, max));
+      }
+      _messageLenByRoom[roomId] = messageCount;
+      _suppressNextAutoFollow = true;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => apply());
+    });
+  }
+
+  void _queueScrollMaintenance(int roomId, int messageLength) {
+    final gen = ++_scrollMaintenanceGeneration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || gen != _scrollMaintenanceGeneration) return;
+      _runScrollMaintenance(roomId, messageLength);
+    });
+  }
+
+  void _runScrollMaintenance(int roomId, int messageLength) {
+    if (_pendingRestoreRoomId == roomId) {
+      _pendingRestoreRoomId = null;
+      _restoreScrollForRoom(roomId, messageLength);
+      return;
+    }
+    if (_suppressNextAutoFollow) {
+      _suppressNextAutoFollow = false;
+      _messageLenByRoom[roomId] = messageLength;
+      return;
+    }
+    final prev = _messageLenByRoom[roomId];
+    _messageLenByRoom[roomId] = messageLength;
+    if (prev != null && messageLength > prev && _isNearBottom()) {
+      _scrollToBottom(animated: true);
+    }
+  }
 
   @override
   void dispose() {
+    if (_activeChatRoomId != null) {
+      _persistScrollForRoom(_activeChatRoomId!);
+    }
+    _scrollController.removeListener(_onScrollPositionChanged);
     _scrollController.dispose();
     _textController.dispose();
     _focusNode.dispose();
@@ -70,7 +204,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   List<MessageModel> _getMessages(RoomModel room) {
     if (room.id == 999) return ref.watch(adminMessageProvider);
     if (room.id == 998) return ref.watch(dbMessageProvider);
-    return ref.watch(messageProvider);
+    return ref.watch(messageProvider).where((m) {
+      if (m.type != MessageType.notice) return true;
+      if (m.noticeForRoomType == null) return true;
+      return m.noticeForRoomType == room.roomType;
+    }).toList();
   }
 
   void _addMessage(RoomModel room, MessageModel msg) {
@@ -80,6 +218,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       ref.read(dbMessageProvider.notifier).add(msg);
     } else {
       ref.read(messageProvider.notifier).add(msg);
+      ref.read(roomProvider.notifier).updateRoom(room.id, (r) => r.copyWith(
+            lastMsg: _roomListLastPreview(msg),
+            time: msg.time,
+          ));
     }
   }
 
@@ -328,6 +470,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Widget build(BuildContext context) {
     final room = ref.watch(currentRoomProvider);
     if (room == null) {
+      if (_activeChatRoomId != null) {
+        _persistScrollForRoom(_activeChatRoomId!);
+        _activeChatRoomId = null;
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) => context.go('/rooms'));
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
@@ -339,6 +485,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final isVendorRoom = room.isVendorRoom;
     final messages = _getMessages(room);
 
+    if (_activeChatRoomId != room.id) {
+      if (_activeChatRoomId != null) {
+        _persistScrollForRoom(_activeChatRoomId!);
+      }
+      _activeChatRoomId = room.id;
+      _pendingRestoreRoomId = room.id;
+    }
+    _queueScrollMaintenance(room.id, messages.length);
+
     // 운행 관리 현황: 입장 시 및 보고 메시지 변경 시 자동 집계
     if (isAdminRoom) {
       ref.listen(messageProvider, (prev, next) {
@@ -348,8 +503,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       });
       WidgetsBinding.instance.addPostFrameCallback((_) => _generateSummary());
     }
-
-    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom(animated: false));
 
     return Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
@@ -402,7 +555,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         children: [
           IconButton(
             icon: const Text('‹', style: TextStyle(fontSize: 28, color: Color(0xFF333333), fontWeight: FontWeight.w300, height: 1)),
-            onPressed: () => context.go('/rooms'),
+            onPressed: () {
+              _persistScrollForRoom(room.id);
+              context.go('/rooms');
+            },
           ),
           Expanded(
             child: Text(room.name, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, letterSpacing: -0.5)),

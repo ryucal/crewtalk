@@ -1,5 +1,6 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart'
+    show kIsWeb, debugPrint, defaultTargetPlatform, TargetPlatform, VoidCallback;
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
@@ -151,35 +152,40 @@ class GpsService {
     }
   }
 
-  // ─── GPS 스트림 (5초 간격) ──────────────────────────────────────────────────
+  // ─── GPS 스트림 ────────────────────────────────────────────────────────────
+  /// Android: [AndroidSettings.intervalDuration]으로 약 5초 간격(플랫폼 기본도 5초).
+  /// iOS: [AppleSettings] + distanceFilter 0 — OS가 주는 주기에 따름(간격 API 없음).
+  /// 그 외: 범용 [LocationSettings].
+  LocationSettings _positionStreamSettings() {
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.android:
+        return AndroidSettings(
+          accuracy: LocationAccuracy.bestForNavigation,
+          distanceFilter: 0,
+          intervalDuration: const Duration(seconds: 5),
+        );
+      case TargetPlatform.iOS:
+      case TargetPlatform.macOS:
+        return AppleSettings(
+          accuracy: LocationAccuracy.bestForNavigation,
+          distanceFilter: 0,
+          pauseLocationUpdatesAutomatically: false,
+        );
+      default:
+        return const LocationSettings(
+          accuracy: LocationAccuracy.bestForNavigation,
+          distanceFilter: 0,
+        );
+    }
+  }
 
   void _startPositionStream() {
     _positionSub = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.bestForNavigation,
-        distanceFilter: 0,
-      ),
+      locationSettings: _positionStreamSettings(),
     ).listen(
       _onPosition,
       onError: (e) => debugPrint('[GpsService] 스트림 오류: $e'),
     );
-
-    // geolocator 스트림 자체에 interval 옵션이 없으므로
-    // 5초마다 단발 위치를 추가로 수집
-    Timer.periodic(const Duration(seconds: 5), (t) async {
-      if (!_active) {
-        t.cancel();
-        return;
-      }
-      try {
-        final pos = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.bestForNavigation,
-          ),
-        );
-        _onPosition(pos);
-      } catch (_) {}
-    });
   }
 
   void _onPosition(Position pos) {

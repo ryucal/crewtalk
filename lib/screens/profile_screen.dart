@@ -1,7 +1,9 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../providers/app_provider.dart';
+import '../services/auth_repository.dart';
 import '../utils/app_colors.dart';
 import '../utils/helpers.dart';
 
@@ -37,7 +39,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     super.dispose();
   }
 
-  void _handleSave() {
+  Future<void> _handleSave() async {
     String carVal = _carCtrl.text.trim();
     if (carVal.isNotEmpty) {
       carVal = formatCarNumber(carVal);
@@ -50,7 +52,24 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
 
     final user = ref.read(userProvider);
     if (user == null) return;
-    ref.read(userProvider.notifier).update(
+
+    if (user.firebaseUid != null && AuthRepository.firebaseAvailable) {
+      try {
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.firebaseUid!)
+            .update({'car': carVal});
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('서버 저장에 실패했어요: $e')),
+          );
+        }
+        return;
+      }
+    }
+
+    await ref.read(userProvider.notifier).update(
       user.copyWith(car: carVal),
     );
 
@@ -91,9 +110,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   )),
                   const SizedBox(width: 8),
                   Expanded(child: GestureDetector(
-                    onTap: () {
+                    onTap: () async {
                       Navigator.pop(context);
-                      ref.read(userProvider.notifier).logout();
+                      await ref.read(userProvider.notifier).logout();
+                      if (!mounted) return;
                       context.go('/login');
                     },
                     child: Container(
@@ -145,9 +165,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   )),
                   const SizedBox(width: 8),
                   Expanded(child: GestureDetector(
-                    onTap: () {
+                    onTap: () async {
                       Navigator.pop(context);
-                      ref.read(userProvider.notifier).logout();
+                      await ref.read(userProvider.notifier).logout();
+                      if (!mounted) return;
                       context.go('/login');
                     },
                     child: Container(

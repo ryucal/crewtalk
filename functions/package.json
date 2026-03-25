@@ -1,0 +1,13 @@
+{
+  "name": "crewtalk-functions",
+  "description": "Cloud Functions for CrewTalk (소속 비밀번호 검증·관리자 소속 등록)",
+  "engines": {
+    "node": "18"
+  },
+  "main": "index.js",
+  "dependencies": {
+    "firebase-admin": "^12.6.0",
+    "firebase-functions": "^5.1.1"
+  },
+  "private": true
+}

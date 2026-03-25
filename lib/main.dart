@@ -1,12 +1,18 @@
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'firebase_options.dart';
+import 'models/user_model.dart';
+import 'providers/app_provider.dart';
 import 'router/app_router.dart';
+import 'services/auth_repository.dart';
 import 'services/gps_service.dart';
+import 'services/user_session_storage.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 
@@ -16,7 +22,24 @@ void main() {
     FlutterForegroundTask.initCommunicationPort();
   }
 
-  runApp(const ProviderScope(child: CrewTalkApp()));
+  UserModel? initialUser;
+  try {
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+    initialUser = await AuthRepository.loadSessionUser();
+  } catch (e, st) {
+    debugPrint('Firebase 초기화 실패 — 로컬 모드로 동작합니다.\n$e\n$st');
+  }
+
+  initialUser ??= await UserSessionStorage.loadUser();
+
+  runApp(
+    ProviderScope(
+      overrides: [
+        userProvider.overrideWith((ref) => UserNotifier(initialUser)),
+      ],
+      child: const CrewTalkApp(),
+    ),
+  );
 }
 
 class CrewTalkApp extends ConsumerWidget {

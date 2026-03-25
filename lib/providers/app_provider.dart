@@ -3,16 +3,30 @@ import '../models/user_model.dart';
 import '../models/room_model.dart';
 import '../models/message_model.dart';
 import '../models/company_model.dart';
+import '../services/auth_repository.dart';
+import '../services/user_session_storage.dart';
 import '../utils/sample_data.dart';
 import '../utils/helpers.dart';
 
 // ─── 유저 ─────────────────────────────────────────────────────
 class UserNotifier extends StateNotifier<UserModel?> {
-  UserNotifier() : super(null);
+  UserNotifier([super.state]);
 
-  void login(UserModel user) => state = user;
-  void logout() => state = null;
-  void update(UserModel user) => state = user;
+  Future<void> login(UserModel user) async {
+    state = user;
+    await UserSessionStorage.saveUser(user);
+  }
+
+  Future<void> logout() async {
+    await AuthRepository.signOutFirebase();
+    state = null;
+    await UserSessionStorage.clear();
+  }
+
+  Future<void> update(UserModel user) async {
+    state = user;
+    await UserSessionStorage.saveUser(user);
+  }
 }
 
 final userProvider = StateNotifierProvider<UserNotifier, UserModel?>(

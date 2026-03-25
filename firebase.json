@@ -1,0 +1,1 @@
+{"firestore":{"rules":"firebase/firestore.rules"},"functions":{"source":"functions"},"flutter":{"platforms":{"dart":{"lib/firebase_options.dart":{"projectId":"crewtalk8","configurations":{"web":"1:297756278549:web:48b63705da933b4d94b31c"}}}}}}
