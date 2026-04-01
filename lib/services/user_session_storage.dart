@@ -33,4 +33,53 @@ class UserSessionStorage {
     final sp = await SharedPreferences.getInstance();
     await sp.remove(_key);
   }
+
+  // ─── 방별 읽음 상태 (안읽음 뱃지용) ────────────────────────────
+
+  static const _readPrefix = 'room_last_read_';
+
+  static Future<int> getLastReadAt(int roomId) async {
+    final sp = await SharedPreferences.getInstance();
+    return sp.getInt('$_readPrefix$roomId') ?? 0;
+  }
+
+  static Future<void> setLastReadAt(int roomId, int epochMs) async {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setInt('$_readPrefix$roomId', epochMs);
+  }
+
+  static Future<Map<int, int>> getAllLastReadAt(List<int> roomIds) async {
+    final sp = await SharedPreferences.getInstance();
+    final result = <int, int>{};
+    for (final id in roomIds) {
+      result[id] = sp.getInt('$_readPrefix$id') ?? 0;
+    }
+    return result;
+  }
+
+  // ─── 포그라운드 메시지 알림 (채팅 목록 동기화용) ─────────────────
+
+  static const _keyMessageNotifSound = 'settings_message_notif_sound_v1';
+  static const _keyMessageNotifVibrate = 'settings_message_notif_vibrate_v1';
+
+  static Future<bool> getMessageNotifSoundEnabled() async {
+    final sp = await SharedPreferences.getInstance();
+    return sp.getBool(_keyMessageNotifSound) ?? true;
+  }
+
+  static Future<void> setMessageNotifSoundEnabled(bool value) async {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setBool(_keyMessageNotifSound, value);
+  }
+
+  static Future<bool> getMessageNotifVibrateEnabled() async {
+    final sp = await SharedPreferences.getInstance();
+    return sp.getBool(_keyMessageNotifVibrate) ?? true;
+  }
+
+  static Future<void> setMessageNotifVibrateEnabled(bool value) async {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setBool(_keyMessageNotifVibrate, value);
+  }
+
 }

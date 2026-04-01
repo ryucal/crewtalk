@@ -1,14 +1,21 @@
+import 'dart:async';
+
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'database/app_database.dart';
+import 'database/message_dao.dart';
 import 'firebase_options.dart';
+import 'models/room_model.dart';
 import 'models/user_model.dart';
 import 'providers/app_provider.dart';
 import 'router/app_router.dart';
 import 'services/auth_repository.dart';
+import 'services/fcm_push_service.dart';
 import 'widgets/firestore_room_sync.dart';
 import 'services/gps_service.dart';
 import 'services/user_session_storage.dart';
@@ -24,14 +31,38 @@ Future<void> main() async {
   }
 
   UserModel? initialUser;
+
+  // 1단계: Firebase 초기화
   try {
     await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-    initialUser = await AuthRepository.loadSessionUser();
+    if (!kIsWeb) {
+      FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+      await FcmPushService.init();
+    }
   } catch (e, st) {
-    debugPrint('Firebase 초기화 실패 — 로컬 모드로 동작합니다.\n$e\n$st');
+    if (kDebugMode) debugPrint('Firebase 초기화 실패 — 로컬 모드로 동작합니다.\n$e\n$st');
   }
 
-  initialUser ??= await UserSessionStorage.loadUser();
+  // 2단계: 세션 복원 (Firebase 가용 여부에 따라 분기)
+  if (AuthRepository.firebaseAvailable) {
+    try {
+      initialUser = await AuthRepository.loadSessionUser();
+      if (!kIsWeb) {
+        await FcmPushService.syncForLoggedInUser(initialUser?.firebaseUid);
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('세션 복원 실패 — 로그인 화면으로 이동합니다.\n$e');
+      try { await AuthRepository.signOutFirebase(); } catch (_) {}
+      try { await UserSessionStorage.clear(); } catch (_) {}
+    }
+  } else {
+    initialUser = await UserSessionStorage.loadUser();
+  }
+
+  // 30일 이상 된 캐시 메시지 정리 (fire-and-forget)
+  AppDatabase().deleteOldMessages(30).then((count) {
+    if (kDebugMode && count > 0) debugPrint('drift: purged $count old cached messages');
+  }).catchError((_) {});
 
   runApp(
     ProviderScope(
@@ -45,11 +76,91 @@ Future<void> main() async {
   );
 }
 
-class CrewTalkApp extends ConsumerWidget {
+class CrewTalkApp extends ConsumerStatefulWidget {
   const CrewTalkApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<CrewTalkApp> createState() => _CrewTalkAppState();
+}
+
+class _CrewTalkAppState extends ConsumerState<CrewTalkApp> {
+  StreamSubscription<RemoteMessage>? _fcmOpenedSub;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _bindPushNavigation());
+  }
+
+  void _bindPushNavigation() {
+    if (kIsWeb || !AuthRepository.firebaseAvailable) return;
+
+    FcmPushService.onLocalNotificationTapped = _openFromPayloadString;
+
+    _fcmOpenedSub = FirebaseMessaging.onMessageOpenedApp.listen(_openFromRemoteMessage);
+    FirebaseMessaging.instance.getInitialMessage().then((RemoteMessage? msg) {
+      if (msg == null || !mounted) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _navigateFromNotificationData(msg.data);
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _fcmOpenedSub?.cancel();
+    FcmPushService.onLocalNotificationTapped = null;
+    super.dispose();
+  }
+
+  void _openFromPayloadString(String? payload) {
+    if (payload == null || payload.isEmpty) {
+      _navigateFromNotificationData(const {});
+      return;
+    }
+    _navigateFromNotificationData({'roomId': payload});
+  }
+
+  void _openFromRemoteMessage(RemoteMessage msg) {
+    _navigateFromNotificationData(msg.data);
+  }
+
+  /// 긴급/일반 푸시 data 의 `roomId` 로 채팅방 이동, 없거나 목록에 없으면 목록으로
+  void _navigateFromNotificationData(Map<String, dynamic> data) {
+    if (!mounted) return;
+    final router = ref.read(routerProvider);
+    final user = ref.read(userProvider);
+    if (user == null) {
+      router.go('/login');
+      return;
+    }
+
+    final roomIdStr = data['roomId'] as String?;
+    final id = int.tryParse(roomIdStr ?? '');
+    if (id == null) {
+      router.go('/rooms');
+      return;
+    }
+
+    final rooms = ref.read(roomProvider);
+    RoomModel? room;
+    for (final r in rooms) {
+      if (r.id == id) {
+        room = r;
+        break;
+      }
+    }
+
+    if (room != null) {
+      ref.read(currentRoomProvider.notifier).state = room;
+      router.push('/chat');
+    } else {
+      router.go('/rooms');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final router = ref.watch(routerProvider);
 
     return MaterialApp.router(

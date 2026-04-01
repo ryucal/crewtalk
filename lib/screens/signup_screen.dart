@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -51,8 +52,8 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
       setState(() => _error = '소속을 선택해주세요');
       return;
     }
-    if (_password.length < 6) {
-      setState(() => _error = '개인 비밀번호는 6자 이상이어야 해요');
+    if (_password.length < 6 || !RegExp(r'^\d+$').hasMatch(_password)) {
+      setState(() => _error = '개인 비밀번호는 숫자 6자 이상이어야 해요');
       return;
     }
     if (_password != _password2) {
@@ -168,15 +169,24 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
                   ),
                   const SizedBox(height: 8),
                   namesAsync.when(
-                    data: (items) => AuthLineDropdown(
-                      label: '소속',
-                      value: _company.isEmpty ? null : _company,
-                      items: items,
-                      onChanged: (v) => setState(() {
-                        _company = v ?? '';
-                        _error = '';
-                      }),
-                    ),
+                    data: (items) => items.isEmpty
+                        ? Text(
+                            '등록된 소속이 없어요. 관리자가 Firebase에서 소속 목록을 동기화한 뒤 다시 시도해 주세요.',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Colors.black.withValues(alpha: 0.65),
+                              height: 1.35,
+                            ),
+                          )
+                        : AuthLineDropdown(
+                            label: '소속',
+                            value: _company.isEmpty ? null : _company,
+                            items: items,
+                            onChanged: (v) => setState(() {
+                              _company = v ?? '';
+                              _error = '';
+                            }),
+                          ),
                     loading: () => const Padding(
                       padding: EdgeInsets.symmetric(vertical: 16),
                       child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
@@ -186,9 +196,11 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
                   const SizedBox(height: 8),
                   AuthLineField(
                     label: '개인 비밀번호',
-                    placeholder: '6자 이상',
+                    placeholder: '숫자 6자 이상',
                     focusNode: _pwFocus,
                     obscureText: true,
+                    keyboardType: const TextInputType.numberWithOptions(signed: false, decimal: false),
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                     onChanged: (v) => setState(() {
                       _password = v;
                       _error = '';
@@ -201,6 +213,8 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
                     placeholder: '한 번 더 입력',
                     focusNode: _pw2Focus,
                     obscureText: true,
+                    keyboardType: const TextInputType.numberWithOptions(signed: false, decimal: false),
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                     onChanged: (v) => setState(() {
                       _password2 = v;
                       _error = '';

@@ -41,13 +41,17 @@
 
         <!-- flutter_foreground_task 서비스 -->
         <service
-            android:name="com.pravera.flutter_foreground_task.service.ForegroundTaskService"
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:foregroundServiceType="location"
             android:exported="false"/>
 
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- FCM 기본 채널 (앱 종료 상태에서도 시스템 트레이 표시) -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="crewtalk_messages" />
     </application>
 
     <queries>

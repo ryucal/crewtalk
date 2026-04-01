@@ -31,16 +31,9 @@
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>UISupportedInterfaceOrientations~ipad</key>
-	<array>
-		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationPortraitUpsideDown</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
-	</array>
+	<key>UIRequiresFullScreen</key>
+	<true/>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
@@ -56,12 +49,22 @@
 
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>채팅에 사진을 보내기 위해 사진 라이브러리에 접근합니다.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>채팅에 사진을 보내기 위해 카메라에 접근합니다.</string>
 
 	<!-- 백그라운드 모드 -->
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>
 		<string>fetch</string>
+		<string>remote-notification</string>
+	</array>
+
+	<!-- 카카오맵 앱 링크 (공유 URL이 kakaomap:// 인 경우) -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>kakaomap</string>
+		<string>tel</string>
 	</array>
 </dict>
 </plist>

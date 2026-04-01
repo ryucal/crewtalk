@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../models/message_model.dart';
 import '../utils/app_colors.dart';
 import '../utils/helpers.dart';
@@ -48,6 +49,8 @@ class MessageBubble extends StatefulWidget {
   final void Function(int id) onDelete;
   final void Function(int id, String emoji, String user) onReact;
   final void Function(String imageUrl) onOpenGallery;
+  final void Function(MessageModel msg, String newStatus)? onMaintenanceStatusChanged;
+  final void Function(MessageModel msg, {required String car, required String route, String? subRoute, required String reportType, required int count, required int maxCount})? onEditReport;
 
   const MessageBubble({
     super.key,
@@ -58,6 +61,8 @@ class MessageBubble extends StatefulWidget {
     required this.onDelete,
     required this.onReact,
     required this.onOpenGallery,
+    this.onMaintenanceStatusChanged,
+    this.onEditReport,
   });
 
   @override
@@ -144,6 +149,41 @@ class _MessageBubbleState extends State<MessageBubble> {
     );
   }
 
+  void _showReportEditDialog() {
+    final rd = msg.reportData;
+    if (rd == null) return;
+    showDialog(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (_) => _ReportEditDialog(
+        car: msg.car ?? '',
+        route: msg.route ?? '',
+        subRoute: msg.subRoute ?? '',
+        reportType: rd.type,
+        count: rd.count,
+        maxCount: rd.maxCount,
+        onSave: ({
+          required String car,
+          required String route,
+          String? subRoute,
+          required String reportType,
+          required int count,
+          required int maxCount,
+        }) {
+          widget.onEditReport?.call(
+            msg,
+            car: car,
+            route: route,
+            subRoute: subRoute,
+            reportType: reportType,
+            count: count,
+            maxCount: maxCount,
+          );
+        },
+      ),
+    );
+  }
+
   Widget _popupBtn({
     required Widget child,
     required VoidCallback onTap,
@@ -193,7 +233,13 @@ class _MessageBubbleState extends State<MessageBubble> {
               children: [
                 const Text('메시지 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, decoration: TextDecoration.none, color: Colors.black)),
                 const SizedBox(height: 8),
-                const Text('이 메시지를 삭제하시겠습니까?', style: TextStyle(fontSize: 13, color: Color(0xFF666666), decoration: TextDecoration.none)),
+                Text(
+                  msg.type == MessageType.image
+                      ? '이 사진 메시지를 삭제하시겠습니까?'
+                      : '이 메시지를 삭제하시겠습니까?',
+                  style: const TextStyle(fontSize: 13, color: Color(0xFF666666), decoration: TextDecoration.none),
+                  textAlign: TextAlign.center,
+                ),
                 const SizedBox(height: 20),
                 Row(children: [
                   Expanded(child: GestureDetector(
@@ -227,7 +273,15 @@ class _MessageBubbleState extends State<MessageBubble> {
     );
   }
 
+  static const _textEditableTypes = {MessageType.text, MessageType.notice};
+
   void _showReactionDialog() {
+    final canEditText = widget.isAdmin && _textEditableTypes.contains(msg.type);
+    final canEditReport = widget.isAdmin && msg.type == MessageType.report && widget.onEditReport != null;
+    final canEdit = canEditText || canEditReport;
+    final canDelete = widget.isAdmin || msg.isMe;
+    if (!canEdit && !canDelete) return;
+
     showDialog(
       context: context,
       barrierColor: Colors.black26,
@@ -248,38 +302,29 @@ class _MessageBubbleState extends State<MessageBubble> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // ─── 수정 (관리자 전용) ───────────────────────
-                  if (widget.isAdmin) ...[
+                  if (canEdit) ...[
                     _popupBtn(
                       onTap: () {
                         Navigator.pop(context);
-                        _showEditDialog();
+                        if (canEditReport) {
+                          _showReportEditDialog();
+                        } else {
+                          _showEditDialog();
+                        }
                       },
                       child: const Icon(Icons.edit_outlined, size: 24, color: Color(0xFF3B82F6)),
                     ),
-                    _divider(),
+                    if (canDelete) _divider(),
                   ],
-                  // ─── 리액션 이모지 ─────────────────────────────
-                  ...kReactionEmojis.map((emoji) {
-                    final isMine = (msg.reactions[emoji] ?? []).contains(widget.currentUser);
-                    return _popupBtn(
+                  if (canDelete) ...[
+                    _popupBtn(
                       onTap: () {
                         Navigator.pop(context);
-                        widget.onReact(msg.id, emoji, widget.currentUser);
+                        _showDeleteConfirmDialog();
                       },
-                      highlighted: isMine,
-                      child: Text(emoji, style: const TextStyle(fontSize: 24)),
-                    );
-                  }),
-                  // ─── 삭제 ──────────────────────────────────────
-                  _divider(),
-                  _popupBtn(
-                    onTap: () {
-                      Navigator.pop(context);
-                      _showDeleteConfirmDialog();
-                    },
-                    child: const Icon(Icons.delete_outline_rounded, size: 26, color: Color(0xFFEF4444)),
-                  ),
+                      child: const Icon(Icons.delete_outline_rounded, size: 26, color: Color(0xFFEF4444)),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -292,14 +337,15 @@ class _MessageBubbleState extends State<MessageBubble> {
   @override
   Widget build(BuildContext context) {
     switch (msg.type) {
-      case MessageType.dbResult:   return _buildDbResult();
-      case MessageType.summary:    return _buildSummary();
-      case MessageType.emergency:  return _buildEmergency();
+      case MessageType.dbResult:     return _buildDbResult();
+      case MessageType.summary:      return _buildSummary();
+      case MessageType.emergency:    return _buildEmergency();
       case MessageType.vendorReport: return _buildVendorReport();
-      case MessageType.notice:     return _buildNotice();
-      case MessageType.image:      return _buildImage();
-      case MessageType.report:     return _buildReport();
-      case MessageType.text:       return _buildText();
+      case MessageType.maintenance:  return _buildMaintenance();
+      case MessageType.notice:       return _buildNotice();
+      case MessageType.image:        return _buildImage();
+      case MessageType.report:       return _buildReport();
+      case MessageType.text:         return _buildText();
     }
   }
 
@@ -356,7 +402,8 @@ class _MessageBubbleState extends State<MessageBubble> {
 
   // ─── 2. 인원 보고 카드 ───────────────────────────────────────
   Widget _buildReport() {
-    final rd = msg.reportData!;
+    final rd = msg.reportData;
+    if (rd == null) return const SizedBox.shrink();
     final isOut = rd.type == '퇴근';
     final color = isOut ? AppColors.eveningRed : AppColors.morningBlue;
     final bg = isOut ? AppColors.eveningRedBg : AppColors.morningBlueBg;
@@ -374,50 +421,47 @@ class _MessageBubbleState extends State<MessageBubble> {
               children: [
                 if (!msg.isMe) _senderName(),
                 Row(
+                  mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    if (msg.isMe) ...[_timeText(), const SizedBox(width: 4)],
+                    if (msg.isMe) ...[_timeText(stripSeconds: true), const SizedBox(width: 4)],
                     Flexible(
-                      child: Align(
-                        alignment: msg.isMe ? Alignment.centerRight : Alignment.centerLeft,
-                        child: GestureDetector(
-                          onLongPress: _showReactionDialog,
-                          onDoubleTap: widget.isAdmin ? _showEditDialog : null,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
-                            decoration: BoxDecoration(
-                              color: bg,
-                              border: Border.all(color: color, width: 1.5),
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Wrap(
-                              spacing: 6,
-                              runSpacing: 4,
-                              crossAxisAlignment: WrapCrossAlignment.center,
-                              children: [
-                                Text(msg.car ?? '', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
+                      child: GestureDetector(
+                        onLongPress: _showReactionDialog,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
+                          decoration: BoxDecoration(
+                            color: bg,
+                            border: Border.all(color: color, width: 1.5),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              Text(msg.car ?? '', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
+                              Text('·', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color.withValues(alpha: 0.4))),
+                              Text(msg.route ?? '', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
+                              if (msg.subRoute != null) ...[
                                 Text('·', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color.withValues(alpha: 0.4))),
-                                Text(msg.route ?? '', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
-                                if (msg.subRoute != null) ...[
-                                  Text('·', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color.withValues(alpha: 0.4))),
-                                  Text(msg.subRoute!, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
-                                ],
-                                Text('·', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color.withValues(alpha: 0.4))),
-                                Text(rd.type, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
-                                Text('·', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color.withValues(alpha: 0.4))),
-                                Text('${rd.count}명', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
-                                if (rd.isOverCapacity) Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                                  decoration: BoxDecoration(color: AppColors.overCapacity, borderRadius: BorderRadius.circular(4)),
-                                  child: const Text('만차', style: TextStyle(fontSize: 11, color: Colors.white)),
-                                ),
+                                Text(msg.subRoute!, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
                               ],
-                            ),
+                              Text('·', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color.withValues(alpha: 0.4))),
+                              Text(rd.type, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
+                              Text('·', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color.withValues(alpha: 0.4))),
+                              Text('${rd.count}명', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
+                              if (rd.isOverCapacity) Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                decoration: BoxDecoration(color: AppColors.overCapacity, borderRadius: BorderRadius.circular(4)),
+                                child: const Text('만차', style: TextStyle(fontSize: 11, color: Colors.white)),
+                              ),
+                            ],
                           ),
                         ),
                       ),
                     ),
-                    if (!msg.isMe) ...[const SizedBox(width: 4), _timeText()],
+                    if (!msg.isMe) ...[const SizedBox(width: 4), _timeText(stripSeconds: true)],
                   ],
                 ),
               ],
@@ -436,9 +480,12 @@ class _MessageBubbleState extends State<MessageBubble> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Padding(
-            padding: EdgeInsets.only(left: 42, bottom: 2),
-            child: Text('관리자', style: TextStyle(fontSize: 11, color: Color(0xFF555555), fontWeight: FontWeight.w600)),
+          Padding(
+            padding: const EdgeInsets.only(left: 42, bottom: 2),
+            child: Text(
+              msg.name.trim().isNotEmpty ? msg.name.trim() : '관리자',
+              style: const TextStyle(fontSize: 11, color: Color(0xFF555555), fontWeight: FontWeight.w600),
+            ),
           ),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -488,8 +535,92 @@ class _MessageBubbleState extends State<MessageBubble> {
     );
   }
 
-  // ─── 4. 이미지 ──────────────────────────────────────────────
+  // ─── 4. 이미지 (단일 / 묶음 그리드) ───────────────────────────
   Widget _buildImage() {
+    final src = msg.imageSources;
+    if (src.isEmpty) return const SizedBox.shrink();
+
+    const maxW = 220.0;
+    const gap = 3.0;
+    final multi = src.length > 1;
+    final cellW = multi ? (maxW - gap) / 2 : maxW;
+    final cellH = multi ? (maxW - gap) / 2 : 280.0;
+    final rowCount = multi ? (src.length / 2).ceil() : 1;
+    final gridH = multi ? rowCount * cellH + (rowCount > 1 ? (rowCount - 1) * gap : 0) : 280.0;
+
+    Widget imageBlock() {
+      if (!multi) {
+        return GestureDetector(
+          onTap: () => widget.onOpenGallery(src.first),
+          onLongPress: _showReactionDialog,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(14),
+            child: TimetableImage(
+              source: src.first,
+              width: maxW,
+              height: gridH,
+              fit: BoxFit.cover,
+            ),
+          ),
+        );
+      }
+      final rows = <Widget>[];
+      for (var r = 0; r < rowCount; r++) {
+        final i0 = r * 2;
+        final cells = <Widget>[
+          GestureDetector(
+            onTap: () => widget.onOpenGallery(src[i0]),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: TimetableImage(
+                source: src[i0],
+                width: cellW,
+                height: cellH,
+                fit: BoxFit.cover,
+              ),
+            ),
+          ),
+        ];
+        if (i0 + 1 < src.length) {
+          cells.add(SizedBox(width: gap));
+          cells.add(
+            GestureDetector(
+              onTap: () => widget.onOpenGallery(src[i0 + 1]),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: TimetableImage(
+                  source: src[i0 + 1],
+                  width: cellW,
+                  height: cellH,
+                  fit: BoxFit.cover,
+                ),
+              ),
+            ),
+          );
+        }
+        rows.add(Row(mainAxisSize: MainAxisSize.min, children: cells));
+        if (r < rowCount - 1) rows.add(SizedBox(height: gap));
+      }
+      return GestureDetector(
+        onLongPress: _showReactionDialog,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: SizedBox(
+            width: maxW,
+            height: gridH,
+            child: Align(
+              alignment: msg.isMe ? Alignment.topRight : Alignment.topLeft,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: msg.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                children: rows,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
@@ -507,18 +638,7 @@ class _MessageBubbleState extends State<MessageBubble> {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     if (msg.isMe) ...[_timeText(), const SizedBox(width: 4)],
-                    GestureDetector(
-                      onTap: () => widget.onOpenGallery(msg.imageUrl ?? ''),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(14),
-                        child: TimetableImage(
-                          source: msg.imageUrl ?? '',
-                          width: 220,
-                          height: 280,
-                          fit: BoxFit.cover,
-                        ),
-                      ),
-                    ),
+                    imageBlock(),
                     if (!msg.isMe) ...[const SizedBox(width: 4), _timeText()],
                   ],
                 ),
@@ -532,47 +652,90 @@ class _MessageBubbleState extends State<MessageBubble> {
   }
 
   // ─── 5. 긴급 호출 ────────────────────────────────────────────
+  Future<void> _dialEmergencyPhone(String raw) async {
+    final digits = raw.replaceAll(RegExp(r'\D'), '');
+    if (digits.isEmpty) return;
+    final uri = Uri(scheme: 'tel', path: digits);
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('전화 앱을 열 수 없어요.')),
+      );
+    }
+  }
+
   Widget _buildEmergency() {
+    final maxW = (MediaQuery.of(context).size.width * 0.88).clamp(240.0, 360.0).toDouble();
+    final name = msg.name.trim();
+    final phone = (msg.phone ?? '').trim();
+    final emergencyType = (msg.emergencyType ?? '').trim();
+    final car = (msg.car ?? '').trim();
+    final route = (msg.route ?? '').trim();
+    final detail = [if (car.isNotEmpty) car, if (route.isNotEmpty) route].join(' · ');
+
     return Center(
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        child: SizedBox(
-          width: MediaQuery.of(context).size.width * 0.9,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(14),
-            child: Column(
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  color: AppColors.eveningRed,
-                  child: Row(
-                    children: [
-                      const Text('🚨', style: TextStyle(fontSize: 18)),
-                      const SizedBox(width: 8),
-                      Text(msg.emergencyType ?? '', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900, color: Colors.white)),
-                    ],
-                  ),
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Container(
+          constraints: BoxConstraints(maxWidth: maxW),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFF5F5),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFFFFCDD2)),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Padding(
+                padding: EdgeInsets.only(top: 1),
+                child: Icon(Icons.emergency_rounded, size: 16, color: Color(0xFFC62828)),
+              ),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      emergencyType.isNotEmpty ? '긴급 호출 · $emergencyType' : '긴급 호출',
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFFC62828)),
+                    ),
+                    const SizedBox(height: 3),
+                    Wrap(
+                      spacing: 5,
+                      runSpacing: 2,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        if (name.isNotEmpty)
+                          Text(name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF1A1A1A))),
+                        if (phone.isNotEmpty)
+                          GestureDetector(
+                            onTap: () => _dialEmergencyPhone(phone),
+                            child: Text(
+                              phone,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.morningBlue,
+                                decoration: TextDecoration.underline,
+                                decorationColor: AppColors.morningBlue.withValues(alpha: 0.5),
+                              ),
+                            ),
+                          ),
+                        if (detail.isNotEmpty)
+                          Text(detail, style: TextStyle(fontSize: 12, color: AppColors.textHint)),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Text(msg.time, style: TextStyle(fontSize: 11, color: AppColors.textHint.withValues(alpha: 0.9))),
+                    ),
+                  ],
                 ),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  color: Colors.white,
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('${msg.name} · ${msg.phone}', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Color(0xFF333333))),
-                          const SizedBox(height: 4),
-                          Text('${msg.car} · ${msg.route}', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Color(0xFF333333))),
-                        ],
-                      ),
-                      Text(msg.time, style: const TextStyle(fontSize: 12, color: AppColors.textHint)),
-                    ],
-                  ),
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
       ),
@@ -581,7 +744,8 @@ class _MessageBubbleState extends State<MessageBubble> {
 
   // ─── 6. 솔라티(구 하청업체) 보고 ─────────────────────────────
   Widget _buildVendorReport() {
-    final vd = msg.vendorData!;
+    final vd = msg.vendorData;
+    if (vd == null) return const SizedBox.shrink();
     const headerBg = AppColors.adminIndigo;
 
     Widget row(String k, String v, {bool emphasize = false}) => Padding(
@@ -619,62 +783,65 @@ class _MessageBubbleState extends State<MessageBubble> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    if (msg.isMe) ...[_timeText(), const SizedBox(width: 4)],
-                    Container(
-                      constraints: const BoxConstraints(maxWidth: 280),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        border: Border.all(color: const Color(0xFFE0E0E0), width: 1.5),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(14),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Container(
-                              color: headerBg,
-                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      Flexible(
-                                        child: Text('🏢 ${vd.company}', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: Colors.white)),
-                                      ),
-                                      Container(
-                                        margin: const EdgeInsets.only(left: 8),
-                                        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
-                                        decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(12)),
-                                        child: const Text('솔라티', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white)),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    (msg.car != null && msg.car!.trim().isNotEmpty)
-                                        ? '운행 인원 보고 · ${msg.car!.trim()}'
-                                        : '운행 인원 보고',
-                                    style: const TextStyle(fontSize: 11, color: Colors.white70),
-                                  ),
-                                ],
+                    if (msg.isMe) ...[_timeText(stripSeconds: true), const SizedBox(width: 4)],
+                    GestureDetector(
+                      onLongPress: _showReactionDialog,
+                      child: Container(
+                        constraints: const BoxConstraints(maxWidth: 280),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          border: Border.all(color: const Color(0xFFE0E0E0), width: 1.5),
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(14),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                color: headerBg,
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Flexible(
+                                          child: Text('🏢 ${vd.company}', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: Colors.white)),
+                                        ),
+                                        Container(
+                                          margin: const EdgeInsets.only(left: 8),
+                                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                                          decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(12)),
+                                          child: const Text('솔라티', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white)),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      (msg.car != null && msg.car!.trim().isNotEmpty)
+                                          ? '운행 인원 보고 · ${msg.car!.trim()}'
+                                          : '운행 인원 보고',
+                                      style: const TextStyle(fontSize: 11, color: Colors.white70),
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ),
-                            row('운행일시', vd.operationDateTime, emphasize: true),
-                            const Divider(height: 1, color: Color(0xFFF0F0F0)),
-                            row('출발지', vd.departure),
-                            row('도착지', vd.destination),
-                            row('탑승인원', vd.passengerCount),
-                            row('이동거리', vd.distanceKm.isEmpty ? '' : (vd.distanceKm.toLowerCase().contains('km') ? vd.distanceKm : '${vd.distanceKm} km')),
-                            row('예약자', vd.reserver),
-                            row('특이사항', vd.specialNote),
-                          ],
+                              row('운행일시', vd.operationDateTime, emphasize: true),
+                              const Divider(height: 1, color: Color(0xFFF0F0F0)),
+                              row('출발지', vd.departure),
+                              row('도착지', vd.destination),
+                              row('탑승인원', vd.passengerCount),
+                              row('이동거리', vd.distanceKm.isEmpty ? '' : (vd.distanceKm.toLowerCase().contains('km') ? vd.distanceKm : '${vd.distanceKm} km')),
+                              row('예약자', vd.reserver),
+                              row('특이사항', vd.specialNote),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                    if (!msg.isMe) ...[const SizedBox(width: 4), _timeText()],
+                    if (!msg.isMe) ...[const SizedBox(width: 4), _timeText(stripSeconds: true)],
                   ],
                 ),
               ],
@@ -686,7 +853,213 @@ class _MessageBubbleState extends State<MessageBubble> {
     );
   }
 
-  // ─── 7. DB 검색 결과 (기사·차량) ─────────────────────────────
+  // ─── 7. 차량 정비 접수 카드 ──────────────────────────────────
+  Widget _buildMaintenance() {
+    final md = msg.maintenanceData;
+    if (md == null) return const SizedBox.shrink();
+
+    final Color urgencyColor;
+    final String urgencyIcon;
+    if (md.driveability == '즉시 점검 필요') {
+      urgencyColor = const Color(0xFFC62828);
+      urgencyIcon = '🚨';
+    } else if (md.driveability == '조심 운행 가능') {
+      urgencyColor = const Color(0xFFE65100);
+      urgencyIcon = '⚠️';
+    } else {
+      urgencyColor = const Color(0xFF2E7D32);
+      urgencyIcon = '✅';
+    }
+
+    final Color statusColor;
+    final String statusLabel;
+    if (md.status == '정비완료') {
+      statusColor = const Color(0xFF2E7D32);
+      statusLabel = '정비완료';
+    } else if (md.status == '정비예정') {
+      statusColor = const Color(0xFF1565C0);
+      statusLabel = '정비예정';
+    } else {
+      statusColor = const Color(0xFF757575);
+      statusLabel = '접수';
+    }
+
+    Widget row(String k, String v) => Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 72,
+            child: Text(k, style: const TextStyle(fontSize: 14, color: Color(0xFF888888), fontWeight: FontWeight.w600)),
+          ),
+          Expanded(
+            child: Text(v.isEmpty ? '—' : v, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: Color(0xFF222222), height: 1.25)),
+          ),
+        ],
+      ),
+    );
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        mainAxisAlignment: msg.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!msg.isMe) ...[_avatar(), const SizedBox(width: 8)],
+          Flexible(
+            child: Column(
+              crossAxisAlignment: msg.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+              children: [
+                if (!msg.isMe) _senderName(),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    if (msg.isMe) ...[_timeText(stripSeconds: true), const SizedBox(width: 4)],
+                    GestureDetector(
+                      onLongPress: _showReactionDialog,
+                      child: Container(
+                      constraints: const BoxConstraints(maxWidth: 300),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        border: Border.all(color: const Color(0xFFE0E0E0), width: 1.5),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(14),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // 헤더
+                            Container(
+                              color: const Color(0xFFE65100),
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Flexible(
+                                        child: Text('🔧 ${md.car}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Colors.white)),
+                                      ),
+                                      Container(
+                                        margin: const EdgeInsets.only(left: 8),
+                                        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                                        decoration: BoxDecoration(color: statusColor.withValues(alpha: 0.9), borderRadius: BorderRadius.circular(12)),
+                                        child: Text(statusLabel, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.white)),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text('차량 정비 접수 · ${md.driverName}', style: const TextStyle(fontSize: 13, color: Colors.white70)),
+                                ],
+                              ),
+                            ),
+                            // 정보 행
+                            row('발생일시', md.occurredAt),
+                            const Divider(height: 1, color: Color(0xFFF0F0F0)),
+                            row('고장증상', md.symptom),
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const SizedBox(width: 72, child: Text('운행여부', style: TextStyle(fontSize: 14, color: Color(0xFF888888), fontWeight: FontWeight.w600))),
+                                  Expanded(
+                                    child: Text('$urgencyIcon ${md.driveability}', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: urgencyColor, height: 1.25)),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            row('연락처', md.phone),
+                            if (md.specialNote.isNotEmpty)
+                              row('특이사항', md.specialNote),
+                            const SizedBox(height: 6),
+                            // 사진 썸네일
+                            if (md.photoUrls.isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                                child: Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: md.photoUrls.map((url) {
+                                    return GestureDetector(
+                                      onTap: () => widget.onOpenGallery(url),
+                                      child: ClipRRect(
+                                        borderRadius: BorderRadius.circular(8),
+                                        child: Image.network(url, width: 56, height: 56, fit: BoxFit.cover,
+                                          errorBuilder: (_, __, ___) => Container(
+                                            width: 56, height: 56, color: const Color(0xFFEEEEEE),
+                                            child: const Icon(Icons.broken_image, size: 20, color: Color(0xFFBBBBBB)),
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  }).toList(),
+                                ),
+                              ),
+                            // 상태 체크 버튼
+                            if (widget.onMaintenanceStatusChanged != null)
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(10, 4, 10, 10),
+                                child: Row(
+                                  children: [
+                                    _maintenanceStatusBtn('정비예정', const Color(0xFF1565C0), md.status == '정비예정'),
+                                    const SizedBox(width: 6),
+                                    _maintenanceStatusBtn('정비완료', const Color(0xFF2E7D32), md.status == '정비완료'),
+                                  ],
+                                ),
+                              )
+                            else
+                              const SizedBox(height: 12),
+                          ],
+                        ),
+                      ),
+                    ),
+                    ),
+                    if (!msg.isMe) ...[const SizedBox(width: 4), _timeText(stripSeconds: true)],
+                  ],
+                ),
+              ],
+            ),
+          ),
+          if (msg.isMe) const SizedBox(width: 8),
+        ],
+      ),
+    );
+  }
+
+  Widget _maintenanceStatusBtn(String label, Color color, bool active) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: () {
+          final newStatus = active ? '접수' : label;
+          widget.onMaintenanceStatusChanged?.call(msg, newStatus);
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            color: active ? color.withValues(alpha: 0.12) : Colors.white,
+            border: Border.all(color: active ? color : const Color(0xFFDDDDDD), width: 1.5),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          alignment: Alignment.center,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(active ? Icons.check_circle : Icons.circle_outlined, size: 16, color: active ? color : const Color(0xFFBBBBBB)),
+              const SizedBox(width: 4),
+              Text(label, style: TextStyle(fontSize: 12, fontWeight: active ? FontWeight.w700 : FontWeight.w400, color: active ? color : const Color(0xFF888888))),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ─── 8. DB 검색 결과 (기사·차량) ─────────────────────────────
   Widget _buildDbResult() {
     final r = msg.resultCard;
     if (r == null) return const SizedBox.shrink();
@@ -1210,7 +1583,12 @@ class _MessageBubbleState extends State<MessageBubble> {
                 );
               }),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                padding: EdgeInsets.fromLTRB(
+                  18,
+                  16,
+                  18,
+                  16 + MediaQuery.viewPaddingOf(context).bottom,
+                ),
                 decoration: const BoxDecoration(
                   color: Color(0xFFF8FAFC),
                   border: Border(top: BorderSide(color: dividerColor)),
@@ -1259,7 +1637,13 @@ class _MessageBubbleState extends State<MessageBubble> {
     child: Text(msg.name, style: const TextStyle(fontSize: 12, color: Color(0xFF333333), fontWeight: FontWeight.w600)),
   );
 
-  Widget _timeText() => Text(msg.time, style: const TextStyle(fontSize: 10, color: Color(0xFF555555)));
+  Widget _timeText({bool stripSeconds = false}) {
+    var t = msg.time;
+    if (stripSeconds && t.length >= 8 && t.split(':').length == 3) {
+      t = t.substring(0, 5);
+    }
+    return Text(t, style: const TextStyle(fontSize: 10, color: Color(0xFF555555)));
+  }
 
   bool _hasReactions() => msg.reactions.values.any((users) => users.isNotEmpty);
 
@@ -1297,4 +1681,242 @@ class _MessageBubbleState extends State<MessageBubble> {
   }
 }
 
+// ─── 인원보고 수정 다이얼로그 ────────────────────────────────────
+class _ReportEditDialog extends StatefulWidget {
+  final String car;
+  final String route;
+  final String subRoute;
+  final String reportType;
+  final int count;
+  final int maxCount;
+  final void Function({
+    required String car,
+    required String route,
+    String? subRoute,
+    required String reportType,
+    required int count,
+    required int maxCount,
+  }) onSave;
 
+  const _ReportEditDialog({
+    required this.car,
+    required this.route,
+    required this.subRoute,
+    required this.reportType,
+    required this.count,
+    required this.maxCount,
+    required this.onSave,
+  });
+
+  @override
+  State<_ReportEditDialog> createState() => _ReportEditDialogState();
+}
+
+class _ReportEditDialogState extends State<_ReportEditDialog> {
+  late final TextEditingController _carCtrl;
+  late final TextEditingController _routeCtrl;
+  late final TextEditingController _subRouteCtrl;
+  late final TextEditingController _countCtrl;
+  late final TextEditingController _maxCountCtrl;
+  late String _reportType;
+
+  @override
+  void initState() {
+    super.initState();
+    _carCtrl = TextEditingController(text: widget.car);
+    _routeCtrl = TextEditingController(text: widget.route);
+    _subRouteCtrl = TextEditingController(text: widget.subRoute);
+    _countCtrl = TextEditingController(text: widget.count.toString());
+    _maxCountCtrl = TextEditingController(text: widget.maxCount.toString());
+    _reportType = widget.reportType;
+  }
+
+  @override
+  void dispose() {
+    _carCtrl.dispose();
+    _routeCtrl.dispose();
+    _subRouteCtrl.dispose();
+    _countCtrl.dispose();
+    _maxCountCtrl.dispose();
+    super.dispose();
+  }
+
+  InputDecoration _fieldDecor(String label) => InputDecoration(
+    labelText: label,
+    labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Color(0xFF64748B)),
+    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+    filled: true,
+    fillColor: const Color(0xFFF8FAFC),
+    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFE2E8F0))),
+    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFE2E8F0))),
+    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5)),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final isOut = _reportType == '퇴근';
+    final accentColor = isOut ? const Color(0xFFEF4444) : const Color(0xFF3B82F6);
+
+    return Center(
+      child: Material(
+        color: Colors.transparent,
+        child: Container(
+          width: 320,
+          margin: const EdgeInsets.symmetric(horizontal: 24),
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: const [BoxShadow(color: Color(0x28000000), blurRadius: 40, offset: Offset(0, 12))],
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: accentColor.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(Icons.edit_note_rounded, size: 22, color: accentColor),
+                    ),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text('인원보고 수정', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: Color(0xFF1E293B))),
+                    ),
+                    GestureDetector(
+                      onTap: () => Navigator.pop(context),
+                      child: const Icon(Icons.close_rounded, size: 22, color: Color(0xFF94A3B8)),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                // 출근/퇴근 토글
+                Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF1F5F9),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  padding: const EdgeInsets.all(4),
+                  child: Row(
+                    children: ['출근', '퇴근'].map((t) {
+                      final selected = _reportType == t;
+                      final c = t == '퇴근' ? const Color(0xFFEF4444) : const Color(0xFF3B82F6);
+                      return Expanded(
+                        child: GestureDetector(
+                          onTap: () => setState(() => _reportType = t),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                            decoration: BoxDecoration(
+                              color: selected ? Colors.white : Colors.transparent,
+                              borderRadius: BorderRadius.circular(9),
+                              boxShadow: selected ? [BoxShadow(color: c.withValues(alpha: 0.15), blurRadius: 8, offset: const Offset(0, 2))] : null,
+                            ),
+                            alignment: Alignment.center,
+                            child: Text(
+                              t,
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                                color: selected ? c : const Color(0xFF94A3B8),
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                TextField(controller: _carCtrl, style: const TextStyle(fontSize: 14), decoration: _fieldDecor('차량번호')),
+                const SizedBox(height: 10),
+                TextField(controller: _routeCtrl, style: const TextStyle(fontSize: 14), decoration: _fieldDecor('노선')),
+                const SizedBox(height: 10),
+                TextField(controller: _subRouteCtrl, style: const TextStyle(fontSize: 14), decoration: _fieldDecor('세부 노선 (선택)')),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _countCtrl,
+                        keyboardType: TextInputType.number,
+                        style: const TextStyle(fontSize: 14),
+                        decoration: _fieldDecor('인원'),
+                      ),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 8),
+                      child: Text('/', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w300, color: Color(0xFFCBD5E1))),
+                    ),
+                    Expanded(
+                      child: TextField(
+                        controller: _maxCountCtrl,
+                        keyboardType: TextInputType.number,
+                        style: const TextStyle(fontSize: 14),
+                        decoration: _fieldDecor('정원'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                Row(
+                  children: [
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () => Navigator.pop(context),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 13),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: const Color(0xFFE2E8F0)),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          alignment: Alignment.center,
+                          child: const Text('취소', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFF64748B))),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () {
+                          final count = int.tryParse(_countCtrl.text.trim()) ?? 0;
+                          final maxCount = int.tryParse(_maxCountCtrl.text.trim()) ?? 0;
+                          final car = _carCtrl.text.trim();
+                          final route = _routeCtrl.text.trim();
+                          if (car.isEmpty || route.isEmpty) return;
+                          Navigator.pop(context);
+                          widget.onSave(
+                            car: car,
+                            route: route,
+                            subRoute: _subRouteCtrl.text.trim().isEmpty ? null : _subRouteCtrl.text.trim(),
+                            reportType: _reportType,
+                            count: count,
+                            maxCount: maxCount,
+                          );
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 13),
+                          decoration: BoxDecoration(
+                            color: accentColor,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          alignment: Alignment.center,
+                          child: const Text('저장', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.white)),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

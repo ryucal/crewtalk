@@ -63,6 +63,7 @@ class AuthRepository {
           'company': company,
           'car': '',
           'isAdmin': false,
+          'role': 'driver',
           'createdAt': FieldValue.serverTimestamp(),
         });
       } catch (_) {
@@ -73,6 +74,7 @@ class AuthRepository {
         name: name.trim(),
         phone: PhoneAuthUtils.formatDisplay(digits),
         company: company,
+        role: UserModel.roleDriver,
         firebaseUid: uid,
       );
     } on FirebaseAuthException catch (e) {
@@ -137,6 +139,7 @@ class AuthRepository {
       throw AuthException('가입 시 등록한 소속과 일치하지 않아요.');
     }
 
+    final roleResolved = UserModel.normalizeRoleFromDoc(d);
     return UserModel(
       name: (d['name'] as String?) ?? '',
       phone: PhoneAuthUtils.formatDisplay(
@@ -144,8 +147,10 @@ class AuthRepository {
       ),
       company: company,
       car: (d['car'] as String?) ?? '',
-      isAdmin: d['isAdmin'] == true,
+      role: roleResolved,
       firebaseUid: uid,
+      mutedRooms: UserModel.parseIdList(d['mutedRooms']),
+      pinnedRoomIds: UserModel.parseIdList(d['pinnedRoomIds']),
     );
   }
 
@@ -154,23 +159,40 @@ class AuthRepository {
     await FirebaseAuth.instance.signOut();
   }
 
-  /// Firestore `users/{uid}` 기준으로 [UserModel] 복원 (앱 cold start)
+  /// Firestore `users/{uid}` 기준으로 [UserModel] 복원 (앱 cold start).
+  /// Firebase Auth 세션이 유효하지 않으면 sign out 후 null 반환.
   static Future<UserModel?> loadSessionUser() async {
     if (!firebaseAvailable) return null;
     final cu = FirebaseAuth.instance.currentUser;
     if (cu == null) return null;
-    final snap =
-        await FirebaseFirestore.instance.collection('users').doc(cu.uid).get();
+
+    try {
+      await cu.reload();
+    } catch (_) {
+      await FirebaseAuth.instance.signOut();
+      return null;
+    }
+
+    final refreshed = FirebaseAuth.instance.currentUser;
+    if (refreshed == null) return null;
+
+    final snap = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(refreshed.uid)
+        .get();
     if (!snap.exists) return null;
     final d = snap.data()!;
     final digits = (d['phoneDigits'] as String?) ?? '';
+    final roleResolved = UserModel.normalizeRoleFromDoc(d);
     return UserModel(
       name: (d['name'] as String?) ?? '',
       phone: PhoneAuthUtils.formatDisplay(digits),
       company: (d['company'] as String?) ?? '',
       car: (d['car'] as String?) ?? '',
-      isAdmin: d['isAdmin'] == true,
-      firebaseUid: cu.uid,
+      role: roleResolved,
+      firebaseUid: refreshed.uid,
+      mutedRooms: UserModel.parseIdList(d['mutedRooms']),
+      pinnedRoomIds: UserModel.parseIdList(d['pinnedRoomIds']),
     );
   }
 
@@ -192,5 +214,17 @@ class AuthRepository {
     final callable =
         FirebaseFunctions.instance.httpsCallable('adminDeleteCompany');
     await callable.call<Map<String, dynamic>>({'name': name.trim()});
+  }
+
+  /// 관리자 전용: config/companies.items → company_profiles 동기화 (로그인·가입 드롭다운용)
+  static Future<int> adminSyncCompanyProfiles() async {
+    final callable =
+        FirebaseFunctions.instance.httpsCallable('adminSyncCompanyProfiles');
+    final res = await callable.call<Map<String, dynamic>>({});
+    final data = res.data;
+    final n = data['syncedCount'];
+    if (n is int) return n;
+    if (n is num) return n.toInt();
+    return 0;
   }
 }

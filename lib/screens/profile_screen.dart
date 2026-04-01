@@ -1,9 +1,11 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../providers/app_provider.dart';
 import '../services/auth_repository.dart';
+import '../services/fcm_push_service.dart';
 import '../utils/app_colors.dart';
 import '../utils/helpers.dart';
 
@@ -62,7 +64,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('서버 저장에 실패했어요: $e')),
+            SnackBar(content: Text('서버 저장에 실패했어요')),
           );
         }
         return;
@@ -133,56 +135,50 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   }
 
   void _handleDeleteAccount() {
+    final user = ref.read(userProvider);
+    if (user == null) return;
+    final hasFirebase = user.firebaseUid != null && AuthRepository.firebaseAvailable;
+
     showDialog(
       context: context,
       barrierColor: Colors.black54,
-      builder: (_) => Center(
-        child: Material(
-          color: Colors.transparent,
-          child: Container(
-            width: 280,
-            padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
-            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16),
-              boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 24, offset: Offset(0, 8))]),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text('계정 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, decoration: TextDecoration.none, color: Color(0xFFEF4444))),
-                const SizedBox(height: 8),
-                const Text('계정을 삭제하면 복구할 수 없습니다.\n정말 삭제하시겠습니까?',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 13, color: Color(0xFF666666), decoration: TextDecoration.none, height: 1.5)),
-                const SizedBox(height: 20),
-                Row(children: [
-                  Expanded(child: GestureDetector(
-                    onTap: () => Navigator.pop(context),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 11),
-                      decoration: BoxDecoration(border: Border.all(color: const Color(0xFFDDDDDD)), borderRadius: BorderRadius.circular(10)),
-                      alignment: Alignment.center,
-                      child: const Text('취소', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFF555555), decoration: TextDecoration.none)),
-                    ),
-                  )),
-                  const SizedBox(width: 8),
-                  Expanded(child: GestureDetector(
-                    onTap: () async {
-                      Navigator.pop(context);
-                      await ref.read(userProvider.notifier).logout();
-                      if (!mounted) return;
-                      context.go('/login');
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 11),
-                      decoration: BoxDecoration(color: const Color(0xFFEF4444), borderRadius: BorderRadius.circular(10)),
-                      alignment: Alignment.center,
-                      child: const Text('삭제', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.white, decoration: TextDecoration.none)),
-                    ),
-                  )),
-                ]),
-              ],
-            ),
-          ),
-        ),
+      builder: (_) => _DeleteAccountDialog(
+        hasFirebase: hasFirebase,
+        onConfirm: (password) async {
+          try {
+            if (hasFirebase) {
+              final cu = FirebaseAuth.instance.currentUser;
+              if (cu != null) {
+                if (password != null && password.isNotEmpty) {
+                  final cred = EmailAuthProvider.credential(
+                    email: cu.email!,
+                    password: password,
+                  );
+                  await cu.reauthenticateWithCredential(cred);
+                }
+                try { await FcmPushService.unregisterCurrentDevice(cu.uid); } catch (_) {}
+                try {
+                  await FirebaseFirestore.instance.collection('users').doc(cu.uid).delete();
+                } catch (_) {}
+                await cu.delete();
+              }
+            }
+            await ref.read(userProvider.notifier).logout();
+            if (!mounted) return null;
+            context.go('/login');
+            return null;
+          } on FirebaseAuthException catch (e) {
+            if (e.code == 'wrong-password' || e.code == 'invalid-credential') {
+              return '비밀번호가 올바르지 않아요';
+            }
+            if (e.code == 'requires-recent-login') {
+              return '보안을 위해 비밀번호를 입력해주세요';
+            }
+            return '계정 삭제에 실패했어요';
+          } catch (_) {
+            return '계정 삭제에 실패했어요';
+          }
+        },
       ),
     );
   }
@@ -206,7 +202,13 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
               children: [
                 IconButton(
                   icon: const Icon(Icons.chevron_left, size: 28),
-                  onPressed: () => context.go('/rooms'),
+                  onPressed: () {
+                    if (context.canPop()) {
+                      context.pop();
+                    } else {
+                      context.go('/rooms');
+                    }
+                  },
                 ),
                 const Expanded(
                   child: Text('프로필 설정', textAlign: TextAlign.center,
@@ -246,12 +248,15 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                           child: Text(user.company.isEmpty ? '소속 미설정' : user.company,
                             style: const TextStyle(fontSize: 12, color: Color(0xFF888888))),
                         ),
-                        if (user.isAdmin) ...[
+                        if (user.isStaffElevated) ...[
                           const SizedBox(height: 8),
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                             decoration: BoxDecoration(color: const Color(0xFF1A237E), borderRadius: BorderRadius.circular(20)),
-                            child: const Text('관리자', style: TextStyle(fontSize: 12, color: Colors.white, fontWeight: FontWeight.w700)),
+                            child: Text(
+                              user.isSuperAdmin ? '슈퍼관리자' : '매니저',
+                              style: const TextStyle(fontSize: 12, color: Colors.white, fontWeight: FontWeight.w700),
+                            ),
                           ),
                         ],
                       ],
@@ -410,3 +415,103 @@ Widget _divider() => Container(
   margin: const EdgeInsets.symmetric(horizontal: 20),
   color: const Color(0xFFF0F0F0),
 );
+
+class _DeleteAccountDialog extends StatefulWidget {
+  final bool hasFirebase;
+  final Future<String?> Function(String? password) onConfirm;
+
+  const _DeleteAccountDialog({required this.hasFirebase, required this.onConfirm});
+
+  @override
+  State<_DeleteAccountDialog> createState() => _DeleteAccountDialogState();
+}
+
+class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
+  final _pwCtrl = TextEditingController();
+  String? _error;
+  bool _loading = false;
+
+  @override
+  void dispose() {
+    _pwCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Material(
+        color: Colors.transparent,
+        child: Container(
+          width: 280,
+          padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16),
+            boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 24, offset: Offset(0, 8))]),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('계정 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, decoration: TextDecoration.none, color: Color(0xFFEF4444))),
+              const SizedBox(height: 8),
+              const Text('계정을 삭제하면 복구할 수 없습니다.\n확인을 위해 비밀번호를 입력해주세요.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 13, color: Color(0xFF666666), decoration: TextDecoration.none, height: 1.5)),
+              if (widget.hasFirebase) ...[
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _pwCtrl,
+                  obscureText: true,
+                  decoration: InputDecoration(
+                    hintText: '개인 비밀번호',
+                    hintStyle: const TextStyle(fontSize: 13, color: Color(0xFFAAAAAA)),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFFDDDDDD))),
+                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFFDDDDDD))),
+                  ),
+                ),
+              ],
+              if (_error != null) ...[
+                const SizedBox(height: 8),
+                Text(_error!, style: const TextStyle(fontSize: 12, color: Color(0xFFEF4444), decoration: TextDecoration.none)),
+              ],
+              const SizedBox(height: 20),
+              Row(children: [
+                Expanded(child: GestureDetector(
+                  onTap: _loading ? null : () => Navigator.pop(context),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 11),
+                    decoration: BoxDecoration(border: Border.all(color: const Color(0xFFDDDDDD)), borderRadius: BorderRadius.circular(10)),
+                    alignment: Alignment.center,
+                    child: const Text('취소', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFF555555), decoration: TextDecoration.none)),
+                  ),
+                )),
+                const SizedBox(width: 8),
+                Expanded(child: GestureDetector(
+                  onTap: _loading ? null : () async {
+                    if (widget.hasFirebase && _pwCtrl.text.trim().isEmpty) {
+                      setState(() => _error = '비밀번호를 입력해주세요');
+                      return;
+                    }
+                    setState(() { _loading = true; _error = null; });
+                    final err = await widget.onConfirm(widget.hasFirebase ? _pwCtrl.text : null);
+                    if (err != null && mounted) {
+                      setState(() { _loading = false; _error = err; });
+                    }
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 11),
+                    decoration: BoxDecoration(color: const Color(0xFFEF4444), borderRadius: BorderRadius.circular(10)),
+                    alignment: Alignment.center,
+                    child: Text(
+                      _loading ? '삭제 중…' : '삭제',
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.white, decoration: TextDecoration.none),
+                    ),
+                  ),
+                )),
+              ]),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

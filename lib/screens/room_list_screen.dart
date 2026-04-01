@@ -3,13 +3,19 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:uuid/uuid.dart';
+import '../models/user_model.dart';
 import '../models/room_model.dart';
 import '../models/company_model.dart';
+import '../models/emergency_contact.dart';
 import '../models/message_model.dart';
 import '../providers/app_provider.dart';
+import '../providers/company_directory_provider.dart';
 import '../providers/gps_provider.dart';
 import '../services/auth_repository.dart';
 import '../services/chat_firestore_repository.dart';
+import '../services/user_session_storage.dart';
 import '../services/gps_service.dart';
 import '../utils/app_colors.dart';
 import '../utils/helpers.dart';
@@ -24,12 +30,16 @@ class RoomListScreen extends ConsumerStatefulWidget {
 }
 
 class _RoomListScreenState extends ConsumerState<RoomListScreen> {
+  static double _savedScrollOffset = 0;
+  late final ScrollController _listScrollController;
+
   bool _editMode = false;
   bool _showActionSheet = false;
   bool _showAddPopup = false;
   bool _showCompanyMgmt = false;
   bool _showBroadcastPopup = false;
   bool _showSettings = false;
+  bool _showEmergencyContacts = false;
   bool _settingNotifSound = true;
   bool _settingVibration = true;
   RoomModel? _pinPopup;
@@ -47,6 +57,7 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
   // 소속 관리
   final _companyNameController = TextEditingController();
   final _companyPwController = TextEditingController();
+  bool _syncingCompanyProfiles = false;
 
   // 전체 공지
   final _broadcastController = TextEditingController();
@@ -54,18 +65,24 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
   /// null: 일반+솔라티 모두, normal/vendor: 해당 유형 채팅방만. 모달 기본값은 일반.
   RoomType? _broadcastRoomKind = RoomType.normal;
 
-  // 채팅방 수정 - 세부노선 추가
+  // 채팅방 수정
   final _editSubRouteController = TextEditingController();
+  final _editRoomNameController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
+    _listScrollController = ScrollController(initialScrollOffset: _savedScrollOffset);
     _companyNameController.addListener(() => setState(() {}));
     _companyPwController.addListener(() => setState(() {}));
   }
 
   @override
   void dispose() {
+    if (_listScrollController.hasClients) {
+      _savedScrollOffset = _listScrollController.offset;
+    }
+    _listScrollController.dispose();
     _subRouteController.dispose();
     _roomNameController.dispose();
     _companyNameController.dispose();
@@ -76,19 +93,77 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
   }
 
   void _enterRoom(RoomModel room) {
+    if (_listScrollController.hasClients) {
+      _savedScrollOffset = _listScrollController.offset;
+    }
     ref.read(currentRoomProvider.notifier).state = room;
-    context.go('/chat');
+    context.push('/chat');
   }
 
-  List<RoomModel> _sortedRooms(List<RoomModel> rooms, bool isAdmin, String userCompany) {
-    final adminRooms = isAdmin ? rooms.where((r) => r.adminOnly).toList() : <RoomModel>[];
+  /// 내 고정 목록에 있는 항목을 먼저(배열 순서), 나머지 글로벌 고정은 방 ID 순
+  int _comparePinnedOrder(RoomModel a, RoomModel b, List<int> userPinOrder) {
+    final ia = userPinOrder.indexOf(a.id);
+    final ib = userPinOrder.indexOf(b.id);
+    final inA = ia >= 0;
+    final inB = ib >= 0;
+    if (inA && inB) return ia.compareTo(ib);
+    if (inA && !inB) return -1;
+    if (!inA && inB) return 1;
+    return a.id.compareTo(b.id);
+  }
+
+  List<RoomModel> _sortedRooms(List<RoomModel> rooms, bool isAdmin, UserModel user) {
+    final isSuperAdmin = user.normalizedRole == UserModel.roleSuperAdmin;
+    final adminRooms = isAdmin
+        ? rooms.where((r) => r.adminOnly && (r.id != 999 || isSuperAdmin)).toList()
+        : <RoomModel>[];
     final visible = rooms.where((r) =>
       !r.adminOnly &&
-      (isAdmin || r.companies.isEmpty || r.companies.contains(userCompany))
+      (isAdmin || r.companies.isEmpty || r.companies.contains(user.company))
     ).toList();
-    final pinned = visible.where((r) => r.pinned).toList();
-    final normal = visible.where((r) => !r.pinned).toList();
+    bool pinnedVisible(RoomModel r) =>
+        user.isRoomPinnedForMe(r.id, globalPinned: r.pinned);
+    final pinned = visible.where(pinnedVisible).toList()
+      ..sort((a, b) => _comparePinnedOrder(a, b, user.pinnedRoomIds));
+    final normal = visible.where((r) => !pinnedVisible(r)).toList();
     return [...adminRooms, ...pinned, ...normal];
+  }
+
+  void _onPinMenuTap(RoomModel room, UserModel user) {
+    final global = room.pinned;
+    final personal = user.pinnedRoomIds.contains(room.id);
+    final showingPinned = user.isRoomPinnedForMe(room.id, globalPinned: global);
+    final useGlobalRoomPin = user.canWriteRoomMetaOnFirestore;
+
+    if (!showingPinned) {
+      if (useGlobalRoomPin) {
+        ref.read(roomProvider.notifier).pin(room.id, true);
+      } else {
+        ref.read(userProvider.notifier).addPinnedRoom(room.id);
+      }
+      setState(() => _pinPopup = null);
+      return;
+    }
+
+    if (useGlobalRoomPin && global) {
+      ref.read(roomProvider.notifier).pin(room.id, false);
+      if (personal) {
+        ref.read(userProvider.notifier).removePinnedRoom(room.id);
+      }
+      setState(() => _pinPopup = null);
+      return;
+    }
+    if (personal) {
+      ref.read(userProvider.notifier).removePinnedRoom(room.id);
+      setState(() => _pinPopup = null);
+      return;
+    }
+    if (global) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('관리자가 상단에 고정한 채팅방은 해제할 수 없습니다.')),
+      );
+    }
+    setState(() => _pinPopup = null);
   }
 
   void _confirmStopGps() {
@@ -140,6 +215,7 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
                           await GpsService.instance.stop();
                           ref.read(gpsActiveProvider.notifier).state = false;
                           ref.read(gpsRunInfoProvider.notifier).state = null;
+                          if (mounted) setState(() {});
                         },
                         child: Container(
                           height: 42,
@@ -166,16 +242,17 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
   Future<void> _handleBroadcast() async {
     final text = _broadcastController.text.trim();
     if (text.isEmpty) return;
+    final user = ref.read(userProvider);
+    if (user == null) return;
     final t = timeNow();
     final d = dateToday();
-    final user = ref.read(userProvider)!;
     final rooms = ref.read(roomProvider);
     final targets = rooms.where((r) {
       if (r.adminOnly) return false;
       if (_broadcastRoomKind != null && r.roomType != _broadcastRoomKind) return false;
-      return _broadcastCompanies.isEmpty ||
-          r.companies.isEmpty ||
-          r.companies.any((c) => _broadcastCompanies.contains(c));
+      // 소속 미선택 = 해당 유형 전체. 소속을 고르면 그 소속이 방에 실제로 묶인 방만 (companies 비어 있으면 제외)
+      if (_broadcastCompanies.isEmpty) return true;
+      return r.companies.any((c) => _broadcastCompanies.contains(c));
     }).toList();
 
     if (AuthRepository.firebaseAvailable) {
@@ -201,7 +278,6 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
           if (r.adminOnly) return r;
           if (_broadcastRoomKind != null && r.roomType != _broadcastRoomKind) return r;
           final isTarget = _broadcastCompanies.isEmpty ||
-              r.companies.isEmpty ||
               r.companies.any((c) => _broadcastCompanies.contains(c));
           return isTarget ? r.copyWith(lastMsg: '📢 $text', time: t) : r;
         }).toList(),
@@ -226,22 +302,53 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
   @override
   Widget build(BuildContext context) {
     final rooms = ref.watch(roomProvider);
-    final user = ref.watch(userProvider)!;
-    final companies = ref.watch(companyProvider);
+    final user = ref.watch(userProvider);
+    if (user == null) {
+      return const Scaffold(body: SizedBox.shrink());
+    }
+    final companies = ref.watch(companyListProvider).maybeWhen(
+          data: (list) => list,
+          orElse: () => const <CompanyModel>[],
+        );
     final isAdmin = user.isAdmin;
-    final sorted = _sortedRooms(rooms, isAdmin, user.company);
+    final sorted = _sortedRooms(rooms, isAdmin, user);
 
-    return Scaffold(
+    final hasOverlay = _showEmergencyContacts ||
+        _showSettings ||
+        _showActionSheet ||
+        _showBroadcastPopup ||
+        _showAddPopup ||
+        _showCompanyMgmt ||
+        _pinPopup != null ||
+        _editRoomPopup != null;
+
+    return PopScope(
+      canPop: !hasOverlay,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) {
+          setState(() {
+            _showEmergencyContacts = false;
+            _showSettings = false;
+            _showActionSheet = false;
+            _showBroadcastPopup = false;
+            _showAddPopup = false;
+            _showCompanyMgmt = false;
+            _pinPopup = null;
+            _editRoomPopup = null;
+          });
+        }
+      },
+      child: Scaffold(
       backgroundColor: Colors.white,
       body: Stack(
         children: [
           Column(
             children: [
-              _buildHeader(isAdmin, companies),
+              _buildHeader(user, companies),
               Expanded(
                 child: _editMode
                     ? _buildEditList(rooms, isAdmin, user.company)
-                    : _buildRoomList(sorted, isAdmin),
+                    : _buildRoomList(sorted, isAdmin, user),
               ),
               _buildProfileBar(user),
             ],
@@ -260,20 +367,24 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
           if (_showCompanyMgmt) _buildCompanyMgmtPopup(companies),
 
           // 길게 누르기 팝업 (고정/수정)
-          if (_pinPopup != null) _buildPinPopup(isAdmin),
+          if (_pinPopup != null) _buildPinPopup(user),
 
           // 채팅방 수정 팝업
           if (_editRoomPopup != null) _buildEditRoomPopup(companies),
+
+          // 비상연락망 팝업
+          if (_showEmergencyContacts) _buildEmergencyContactsPanel(user),
 
           // 앱 설정 팝업
           if (_showSettings) _buildSettingsPanel(user),
         ],
       ),
+    ),
     );
   }
 
   // ─── 헤더 ───────────────────────────────────────────────────
-  Widget _buildHeader(bool isAdmin, List<CompanyModel> companies) {
+  Widget _buildHeader(UserModel user, List<CompanyModel> companies) {
     return Container(
       padding: EdgeInsets.only(
         top: MediaQuery.of(context).padding.top + 14,
@@ -290,8 +401,9 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
         children: [
           const Text('채팅', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800, letterSpacing: 1)),
           const Spacer(),
-          // 운행종료 버튼 (GPS 활성화 중일 때만 표시)
-          if (!kIsWeb && ref.watch(gpsActiveProvider)) ...[
+          // 운행종료: 싱글턴 서비스 상태 + Provider (채팅에서 돌아올 때 목록이 안 갱신되는 경우 대비)
+          if (!kIsWeb &&
+              (GpsService.instance.isActive || ref.watch(gpsActiveProvider))) ...[
             GestureDetector(
               onTap: () => _confirmStopGps(),
               child: Container(
@@ -308,8 +420,8 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
             ),
             const SizedBox(width: 6),
           ],
-          _TextBtn(label: '프로필설정', onTap: () => context.go('/profile')),
-          if (isAdmin) ...[
+          _TextBtn(label: '프로필설정', onTap: () => context.push('/profile')),
+          if (user.isStaffElevated) ...[
             const SizedBox(width: 8),
             if (_editMode)
               Material(
@@ -332,7 +444,26 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
           ],
           const SizedBox(width: 8),
           GestureDetector(
-            onTap: () => setState(() => _showSettings = true),
+            onTap: () => setState(() => _showEmergencyContacts = true),
+            child: Container(
+              width: 34, height: 34,
+              decoration: BoxDecoration(color: const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(10)),
+              alignment: Alignment.center,
+              child: const Icon(Icons.phone_outlined, size: 18, color: Color(0xFF444444)),
+            ),
+          ),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: () async {
+              final sound = await UserSessionStorage.getMessageNotifSoundEnabled();
+              final vib = await UserSessionStorage.getMessageNotifVibrateEnabled();
+              if (!mounted) return;
+              setState(() {
+                _settingNotifSound = sound;
+                _settingVibration = vib;
+                _showSettings = true;
+              });
+            },
             child: Container(
               width: 34, height: 34,
               decoration: BoxDecoration(color: const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(10)),
@@ -346,8 +477,9 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
   }
 
   // ─── 채팅방 목록 ─────────────────────────────────────────────
-  Widget _buildRoomList(List<RoomModel> sorted, bool isAdmin) {
+  Widget _buildRoomList(List<RoomModel> sorted, bool isAdmin, UserModel user) {
     return ListView.builder(
+      controller: _listScrollController,
       padding: EdgeInsets.zero,
       itemCount: sorted.length,
       itemBuilder: (context, i) {
@@ -355,6 +487,7 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
         return _RoomItem(
           room: room,
           isAdmin: isAdmin,
+          showPinnedBadge: user.isRoomPinnedForMe(room.id, globalPinned: room.pinned),
           onTap: () => _enterRoom(room),
           onLongPress: () => setState(() => _pinPopup = room),
         );
@@ -487,8 +620,9 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
 
   // ─── 하단 프로필바 ────────────────────────────────────────────
   Widget _buildProfileBar(dynamic user) {
+    final navBarInset = MediaQuery.viewPaddingOf(context).bottom;
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+      margin: EdgeInsets.fromLTRB(12, 8, 12, 10 + navBarInset),
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 13),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -498,18 +632,19 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
         ],
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          Text(todayLocalized(), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          Text(todayLocalized(), style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
           const _Dot(),
-          Text(user.name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          Text(user.name, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
           const _Dot(),
           Text(user.company.isEmpty ? '소속 미설정' : user.company,
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
           const _Dot(),
           Expanded(
             child: Text(
               user.car.isEmpty ? '차량번호 미설정' : user.car,
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
               overflow: TextOverflow.ellipsis,
             ),
           ),
@@ -520,6 +655,8 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
 
   // ─── 액션시트 ─────────────────────────────────────────────────
   Widget _buildActionSheet(List<CompanyModel> companies) {
+    final u = ref.watch(userProvider);
+    if (u == null) return const SizedBox.shrink();
     final bottomInset = MediaQuery.paddingOf(context).bottom;
     return _BottomSheet(
       onDismiss: () => setState(() => _showActionSheet = false),
@@ -571,38 +708,41 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
             padding: EdgeInsets.symmetric(horizontal: 20),
             child: Divider(height: 24, thickness: 1, color: Color(0xFFF1F5F9)),
           ),
-          _ActionSheetRow(
-            icon: Icons.campaign_outlined,
-            iconBackground: const Color(0xFFFFF7ED),
-            iconColor: const Color(0xFFEA580C),
-            title: '전체 공지',
-            subtitle: '선택한 소속 채팅방에 공지 보내기',
-            onTap: () => setState(() { _showActionSheet = false; _showBroadcastPopup = true; }),
-          ),
-          _ActionSheetRow(
-            icon: Icons.add_comment_rounded,
-            iconBackground: const Color(0xFFECFDF5),
-            iconColor: const Color(0xFF059669),
-            title: '채팅방 추가',
-            subtitle: '일반·솔라티 노선 만들기',
-            onTap: () => setState(() { _showActionSheet = false; _showAddPopup = true; }),
-          ),
-          _ActionSheetRow(
-            icon: Icons.apartment_outlined,
-            iconBackground: AppColors.adminIndigoBg,
-            iconColor: AppColors.adminIndigo,
-            title: '소속 관리',
-            subtitle: '로그인용 소속·비밀번호',
-            onTap: () => setState(() { _showActionSheet = false; _showCompanyMgmt = true; }),
-          ),
-          _ActionSheetRow(
-            icon: Icons.swap_vert_rounded,
-            iconBackground: const Color(0xFFF1F5F9),
-            iconColor: const Color(0xFF475569),
-            title: '순서 편집',
-            subtitle: '채팅방 목록 끌어서 정렬',
-            onTap: () => setState(() { _showActionSheet = false; _editMode = true; }),
-          ),
+          if (u.canBroadcast)
+            _ActionSheetRow(
+              icon: Icons.campaign_outlined,
+              iconBackground: const Color(0xFFFFF7ED),
+              iconColor: const Color(0xFFEA580C),
+              title: '전체 공지',
+              subtitle: '선택한 소속 채팅방에 공지 보내기',
+              onTap: () => setState(() { _showActionSheet = false; _showBroadcastPopup = true; }),
+            ),
+          if (u.canManageRoomsAndConfig) ...[
+            _ActionSheetRow(
+              icon: Icons.add_comment_rounded,
+              iconBackground: const Color(0xFFECFDF5),
+              iconColor: const Color(0xFF059669),
+              title: '채팅방 추가',
+              subtitle: '일반·솔라티 노선 만들기',
+              onTap: () => setState(() { _showActionSheet = false; _showAddPopup = true; }),
+            ),
+            _ActionSheetRow(
+              icon: Icons.apartment_outlined,
+              iconBackground: AppColors.adminIndigoBg,
+              iconColor: AppColors.adminIndigo,
+              title: '소속 관리',
+              subtitle: '로그인용 소속·비밀번호',
+              onTap: () => setState(() { _showActionSheet = false; _showCompanyMgmt = true; }),
+            ),
+            _ActionSheetRow(
+              icon: Icons.swap_vert_rounded,
+              iconBackground: const Color(0xFFF1F5F9),
+              iconColor: const Color(0xFF475569),
+              title: '순서 편집',
+              subtitle: '채팅방 목록 끌어서 정렬',
+              onTap: () => setState(() { _showActionSheet = false; _editMode = true; }),
+            ),
+          ],
           Padding(
             padding: EdgeInsets.fromLTRB(12, 8, 12, 12 + bottomInset),
             child: _SheetDismissBtn(label: '닫기', onTap: () => setState(() => _showActionSheet = false)),
@@ -1187,7 +1327,7 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
                                                         final messenger = ScaffoldMessenger.of(context);
                                                         final u = ref.read(userProvider);
                                                         if (u?.firebaseUid != null &&
-                                                            u!.isAdmin &&
+                                                            u!.canManageRoomsAndConfig &&
                                                             AuthRepository.firebaseAvailable) {
                                                           try {
                                                             await AuthRepository.adminDeleteCompany(
@@ -1197,14 +1337,13 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
                                                             if (mounted) {
                                                               messenger.showSnackBar(
                                                                 SnackBar(
-                                                                  content: Text('Cloud 삭제 실패: $e'),
+                                                                  content: Text('삭제에 실패했어요'),
                                                                 ),
                                                               );
                                                             }
                                                             return;
                                                           }
                                                         }
-                                                        ref.read(companyProvider.notifier).remove(i);
                                                       },
                                                       child: Container(
                                                         padding: const EdgeInsets.symmetric(vertical: 13),
@@ -1259,6 +1398,46 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    onPressed: _syncingCompanyProfiles
+                        ? null
+                        : () async {
+                            final u = ref.read(userProvider);
+                            if (u?.firebaseUid == null ||
+                                !u!.canManageRoomsAndConfig ||
+                                !AuthRepository.firebaseAvailable) {
+                              return;
+                            }
+                            setState(() => _syncingCompanyProfiles = true);
+                            try {
+                              final n = await AuthRepository.adminSyncCompanyProfiles();
+                              if (!mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('로그인·가입용 소속 $n건 동기화했어요')),
+                              );
+                            } catch (_) {
+                              if (!mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('동기화에 실패했어요')),
+                              );
+                            } finally {
+                              if (mounted) {
+                                setState(() => _syncingCompanyProfiles = false);
+                              }
+                            }
+                          },
+                    child: _syncingCompanyProfiles
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('로그인·가입용 소속 목록 동기화'),
+                  ),
+                ),
+                const SizedBox(height: 4),
                 const _SectionLabel(label: '새 소속 추가'),
                 const SizedBox(height: 12),
                 _RoundInput(
@@ -1286,20 +1465,19 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
                           final messenger = ScaffoldMessenger.of(context);
                           final u = ref.read(userProvider);
                           if (u?.firebaseUid != null &&
-                              u!.isAdmin &&
+                              u!.canManageRoomsAndConfig &&
                               AuthRepository.firebaseAvailable) {
                             try {
                               await AuthRepository.adminUpsertCompany(name: nm, password: pw);
                             } catch (e) {
                               if (mounted) {
                                 messenger.showSnackBar(
-                                  SnackBar(content: Text('Cloud 등록 실패: $e')),
+                                  SnackBar(content: Text('등록에 실패했어요')),
                                 );
                               }
                               return;
                             }
                           }
-                          ref.read(companyProvider.notifier).add(CompanyModel(name: nm, password: pw));
                           _companyNameController.clear();
                           _companyPwController.clear();
                           setState(() {});
@@ -1326,8 +1504,14 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
   }
 
   // ─── 고정 팝업 ───────────────────────────────────────────────
-  Widget _buildPinPopup(bool isAdmin) {
-    final room = _pinPopup!;
+  Widget _buildPinPopup(UserModel user) {
+    final popupId = _pinPopup!.id;
+    final room = ref.read(roomProvider).firstWhere(
+          (r) => r.id == popupId,
+          orElse: () => _pinPopup!,
+        );
+    final canEditRoomMetadata = user.canManageRoomsAndConfig;
+    final pinnedForUser = user.isRoomPinnedForMe(room.id, globalPinned: room.pinned);
     return _PopupOverlay(
       onDismiss: () => setState(() => _pinPopup = null),
       child: Column(
@@ -1349,14 +1533,11 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 _PinPopupRow(
-                  icon: room.pinned ? Icons.push_pin : Icons.push_pin_outlined,
-                  label: room.pinned ? '상단 고정 해제' : '상단에 고정',
-                  onTap: () {
-                    ref.read(roomProvider.notifier).pin(room.id, !room.pinned);
-                    setState(() => _pinPopup = null);
-                  },
+                  icon: pinnedForUser ? Icons.push_pin : Icons.push_pin_outlined,
+                  label: pinnedForUser ? '상단 고정 해제' : '상단에 고정',
+                  onTap: () => _onPinMenuTap(room, user),
                 ),
-                if (isAdmin && !room.adminOnly) ...[
+                if (canEditRoomMetadata && !room.adminOnly) ...[
                   const Padding(
                     padding: EdgeInsets.only(left: 52),
                     child: Divider(height: 1, thickness: 0.5, color: Color(0xFFD1D1D6)),
@@ -1366,6 +1547,7 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
                     label: '채팅방 수정',
                     onTap: () => setState(() {
                       _editRoomPopup = room;
+                      _editRoomNameController.text = room.name;
                       _pinPopup = null;
                     }),
                   ),
@@ -1395,21 +1577,165 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
     );
   }
 
-  Future<void> _pickTimetableImages(int roomId) async {
+  Future<void> _pickTimetableImages(int roomId, int slot) async {
+    assert(slot == 1 || slot == 2);
     final picker = ImagePicker();
     final files = await picker.pickMultiImage(imageQuality: 85);
     if (files.isEmpty || !mounted) return;
-    final paths = files.map((x) => x.path).toList();
-    ref.read(roomProvider.notifier).updateRoom(roomId, (r) => r.copyWith(timetableImages: [...r.timetableImages, ...paths]));
+
+    final roomDocId = roomId.toString();
+    final urls = <String>[];
+    for (final f in files) {
+      final url = await ChatFirestoreRepository.uploadTimetableImage(roomDocId, f.path);
+      if (url != null) urls.add(url);
+    }
+    if (!mounted || urls.isEmpty) {
+      if (mounted && urls.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('배차표 이미지를 업로드하지 못했어요')),
+        );
+      }
+      return;
+    }
+    ref.read(roomProvider.notifier).updateRoom(roomId, (r) {
+      if (slot == 1) {
+        return r.copyWith(timetable1Images: [...r.timetable1Images, ...urls]);
+      }
+      return r.copyWith(timetable2Images: [...r.timetable2Images, ...urls]);
+    });
     setState(() {});
   }
 
-  void _removeTimetableImage(int roomId, int index) {
+  void _removeTimetableImage(int roomId, int slot, int index) {
+    assert(slot == 1 || slot == 2);
     ref.read(roomProvider.notifier).updateRoom(roomId, (r) {
-      final next = List<String>.from(r.timetableImages)..removeAt(index);
-      return r.copyWith(timetableImages: next);
+      if (slot == 1) {
+        final next = List<String>.from(r.timetable1Images)..removeAt(index);
+        return r.copyWith(timetable1Images: next);
+      }
+      final next = List<String>.from(r.timetable2Images)..removeAt(index);
+      return r.copyWith(timetable2Images: next);
     });
     setState(() {});
+  }
+
+  Widget _timetableSlotEditor({
+    required int roomId,
+    required int slot,
+    required String sectionLabel,
+    required String hint,
+    required List<String> images,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 22),
+        _SectionLabel(label: sectionLabel, optional: true),
+        const SizedBox(height: 10),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF8FAFC),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                hint,
+                style: const TextStyle(fontSize: 12.5, height: 1.4, color: Color(0xFF64748B)),
+              ),
+              const SizedBox(height: 14),
+              SizedBox(
+                height: 92,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  clipBehavior: Clip.none,
+                  children: [
+                    ...images.asMap().entries.map((e) {
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 12),
+                        child: Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            Container(
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(14),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: const Color(0xFF0F172A).withValues(alpha: 0.08),
+                                    blurRadius: 10,
+                                    offset: const Offset(0, 3),
+                                  ),
+                                ],
+                              ),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(14),
+                                child: SizedBox(
+                                  width: 84,
+                                  height: 84,
+                                  child: TimetableImage(source: e.value, fit: BoxFit.cover, width: 84, height: 84),
+                                ),
+                              ),
+                            ),
+                            Positioned(
+                              top: -5,
+                              right: -5,
+                              child: Material(
+                                color: const Color(0xFF0F172A),
+                                shape: const CircleBorder(),
+                                clipBehavior: Clip.antiAlias,
+                                child: InkWell(
+                                  onTap: () => _removeTimetableImage(roomId, slot, e.key),
+                                  child: const Padding(
+                                    padding: EdgeInsets.all(6),
+                                    child: Icon(Icons.close_rounded, size: 14, color: Colors.white),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }),
+                    Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        onTap: () => _pickTimetableImages(roomId, slot),
+                        borderRadius: BorderRadius.circular(14),
+                        child: Container(
+                          width: 84,
+                          height: 84,
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: const Color(0xFFCBD5E1), width: 1.5),
+                          ),
+                          alignment: Alignment.center,
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.add_photo_alternate_outlined, size: 28, color: AppColors.adminIndigo.withValues(alpha: 0.75)),
+                              const SizedBox(height: 6),
+                              const Text(
+                                '추가',
+                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF64748B)),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 
   // ─── 채팅방 수정 팝업 ─────────────────────────────────────────
@@ -1418,13 +1744,13 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
     final currentRoom = ref.watch(roomProvider).firstWhere((r) => r.id == room.id, orElse: () => room);
     final subRoutes = currentRoom.subRoutes;
     final currentCompanies = currentRoom.companies;
-    final timetable = currentRoom.timetableImages;
     final bottomInset = MediaQuery.paddingOf(context).bottom;
 
     return _BottomSheet(
       onDismiss: () => setState(() {
         _editRoomPopup = null;
         _editSubRouteController.clear();
+        _editRoomNameController.clear();
       }),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1432,8 +1758,8 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
           _sheetHandle(),
           _sheetModalHeader(
             icon: Icons.edit_calendar_rounded,
-            title: room.name,
-            subtitle: '채팅방 편집 · 세부 노선, 배차표, 공개 소속',
+            title: currentRoom.name,
+            subtitle: '채팅방 편집 · 방 제목, 세부 노선, 배차표, 공개 소속',
           ),
           const Divider(height: 1, thickness: 1, color: Color(0xFFF1F5F9)),
           Flexible(
@@ -1442,6 +1768,33 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  const _SectionLabel(label: '방 제목'),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _RoundInput(
+                          controller: _editRoomNameController,
+                          placeholder: '채팅방 이름',
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: _SmallBlackBtn(
+                          label: '변경',
+                          icon: Icons.check_rounded,
+                          onTap: () {
+                            final newName = _editRoomNameController.text.trim();
+                            if (newName.isEmpty || newName == currentRoom.name) return;
+                            ref.read(roomProvider.notifier).updateRoom(room.id, (r) => r.copyWith(name: newName));
+                            setState(() {});
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 22),
                   const _SectionLabel(label: '세부 노선', optional: true),
                   const SizedBox(height: 10),
                   Container(
@@ -1522,110 +1875,19 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
                       ],
                     ),
                   ),
-                  const SizedBox(height: 22),
-                  const _SectionLabel(label: '배차 시간표', optional: true),
-                  const SizedBox(height: 10),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF8FAFC),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: const Color(0xFFE2E8F0)),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          '배차확인에서 기사가 볼 수 있어요. 사진을 여러 장 넣을 수 있어요.',
-                          style: TextStyle(fontSize: 12.5, height: 1.4, color: Color(0xFF64748B)),
-                        ),
-                        const SizedBox(height: 14),
-                        SizedBox(
-                          height: 92,
-                          child: ListView(
-                            scrollDirection: Axis.horizontal,
-                            clipBehavior: Clip.none,
-                            children: [
-                              ...timetable.asMap().entries.map((e) {
-                                return Padding(
-                                  padding: const EdgeInsets.only(right: 12),
-                                  child: Stack(
-                                    clipBehavior: Clip.none,
-                                    children: [
-                                      Container(
-                                        decoration: BoxDecoration(
-                                          borderRadius: BorderRadius.circular(14),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: const Color(0xFF0F172A).withValues(alpha: 0.08),
-                                              blurRadius: 10,
-                                              offset: const Offset(0, 3),
-                                            ),
-                                          ],
-                                        ),
-                                        child: ClipRRect(
-                                          borderRadius: BorderRadius.circular(14),
-                                          child: SizedBox(
-                                            width: 84,
-                                            height: 84,
-                                            child: TimetableImage(source: e.value, fit: BoxFit.cover, width: 84, height: 84),
-                                          ),
-                                        ),
-                                      ),
-                                      Positioned(
-                                        top: -5,
-                                        right: -5,
-                                        child: Material(
-                                          color: const Color(0xFF0F172A),
-                                          shape: const CircleBorder(),
-                                          clipBehavior: Clip.antiAlias,
-                                          child: InkWell(
-                                            onTap: () => _removeTimetableImage(room.id, e.key),
-                                            child: const Padding(
-                                              padding: EdgeInsets.all(6),
-                                              child: Icon(Icons.close_rounded, size: 14, color: Colors.white),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                );
-                              }),
-                              Material(
-                                color: Colors.transparent,
-                                child: InkWell(
-                                  onTap: () => _pickTimetableImages(room.id),
-                                  borderRadius: BorderRadius.circular(14),
-                                  child: Container(
-                                    width: 84,
-                                    height: 84,
-                                    decoration: BoxDecoration(
-                                      color: Colors.white,
-                                      borderRadius: BorderRadius.circular(14),
-                                      border: Border.all(color: const Color(0xFFCBD5E1), width: 1.5),
-                                    ),
-                                    alignment: Alignment.center,
-                                    child: Column(
-                                      mainAxisAlignment: MainAxisAlignment.center,
-                                      children: [
-                                        Icon(Icons.add_photo_alternate_outlined, size: 28, color: AppColors.adminIndigo.withValues(alpha: 0.75)),
-                                        const SizedBox(height: 6),
-                                        const Text(
-                                          '추가',
-                                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF64748B)),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
+                  _timetableSlotEditor(
+                    roomId: room.id,
+                    slot: 1,
+                    sectionLabel: '배차 시간표 1',
+                    hint: '채팅방 상단 [배차표1]으로 열립니다. 사진을 여러 장 넣을 수 있어요.',
+                    images: currentRoom.timetable1Images,
+                  ),
+                  _timetableSlotEditor(
+                    roomId: room.id,
+                    slot: 2,
+                    sectionLabel: '배차 시간표 2',
+                    hint: '[배차표2]로 두 번째 시간표를 따로 둘 수 있어요.',
+                    images: currentRoom.timetable2Images,
                   ),
                   const SizedBox(height: 22),
                   const _SectionLabel(label: '공개 소속'),
@@ -1727,6 +1989,7 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
               onTap: () => setState(() {
                 _editRoomPopup = null;
                 _editSubRouteController.clear();
+                _editRoomNameController.clear();
               }),
             ),
           ),
@@ -1735,6 +1998,353 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
     );
   }
 
+
+  // ─── 비상연락망 패널 ───────────────────────────────────────────
+  Widget _buildEmergencyContactsPanel(UserModel user) {
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final contactsAsync = ref.watch(emergencyContactsProvider);
+    final isSuperAdmin = user.isSuperAdmin;
+
+    return _BottomSheet(
+      onDismiss: () => setState(() => _showEmergencyContacts = false),
+      child: SingleChildScrollView(
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(20, 0, 20, bottomInset + 20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _sheetHandle(),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Container(
+                    width: 40, height: 40,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFEEF2FF),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    alignment: Alignment.center,
+                    child: const Icon(Icons.phone_in_talk_rounded, size: 20, color: Color(0xFF4F46E5)),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text(
+                      '비상연락망',
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, letterSpacing: -0.4, color: Color(0xFF0F172A)),
+                    ),
+                  ),
+                  GestureDetector(
+                    onTap: () => setState(() => _showEmergencyContacts = false),
+                    child: Container(
+                      width: 32, height: 32,
+                      decoration: BoxDecoration(color: const Color(0xFFF1F5F9), borderRadius: BorderRadius.circular(8)),
+                      alignment: Alignment.center,
+                      child: const Icon(Icons.close_rounded, size: 18, color: Color(0xFF94A3B8)),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              contactsAsync.when(
+                loading: () => const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 40),
+                  child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                ),
+                error: (_, __) => const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 40),
+                  child: Center(child: Text('연락처를 불러오지 못했어요', style: TextStyle(color: Color(0xFF94A3B8)))),
+                ),
+                data: (contacts) {
+                  if (contacts.isEmpty) {
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 40),
+                      child: Column(
+                        children: [
+                          const Icon(Icons.contacts_outlined, size: 40, color: Color(0xFFCBD5E1)),
+                          const SizedBox(height: 8),
+                          const Text('등록된 연락처가 없어요', style: TextStyle(color: Color(0xFF94A3B8), fontSize: 14)),
+                          if (isSuperAdmin) ...[
+                            const SizedBox(height: 16),
+                            _emergencyAddButton(),
+                          ],
+                        ],
+                      ),
+                    );
+                  }
+
+                  final grouped = <String, List<EmergencyContact>>{};
+                  for (final c in contacts) {
+                    grouped.putIfAbsent(c.category, () => []).add(c);
+                  }
+
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final entry in grouped.entries) ...[
+                        _emergencyCategorySection(entry.key, entry.value, isSuperAdmin),
+                        const SizedBox(height: 14),
+                      ],
+                      if (isSuperAdmin) ...[
+                        const SizedBox(height: 4),
+                        _emergencyAddButton(),
+                      ],
+                    ],
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _emergencyCategorySection(String category, List<EmergencyContact> contacts, bool isSuperAdmin) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(width: 3, height: 16, decoration: BoxDecoration(color: const Color(0xFF4F46E5), borderRadius: BorderRadius.circular(2))),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                category,
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFF475569), letterSpacing: -0.2),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+          ),
+          child: Column(
+            children: [
+              for (var i = 0; i < contacts.length; i++) ...[
+                if (i > 0) const Divider(height: 1, thickness: 1, color: Color(0xFFF1F5F9), indent: 14, endIndent: 14),
+                _emergencyContactTile(contacts[i], isSuperAdmin),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _emergencyContactTile(EmergencyContact contact, bool isSuperAdmin) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              contact.name,
+              style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w600, color: Color(0xFF1E293B), letterSpacing: -0.2),
+            ),
+          ),
+          GestureDetector(
+            onTap: () {
+              final digits = contact.phone.replaceAll(RegExp(r'[^0-9]'), '');
+              launchUrl(Uri.parse('tel:$digits'));
+            },
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  contact.phone,
+                  style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w500, color: Color(0xFF4F46E5), letterSpacing: -0.1),
+                ),
+                const SizedBox(width: 6),
+                const Icon(Icons.call_rounded, size: 16, color: Color(0xFF4F46E5)),
+              ],
+            ),
+          ),
+          if (isSuperAdmin) ...[
+            const SizedBox(width: 10),
+            GestureDetector(
+              onTap: () => _showEditEmergencyContactDialog(contact),
+              child: const Icon(Icons.edit_outlined, size: 16, color: Color(0xFFAEB8C8)),
+            ),
+            const SizedBox(width: 8),
+            GestureDetector(
+              onTap: () => _confirmDeleteEmergencyContact(contact),
+              child: const Icon(Icons.delete_outline_rounded, size: 16, color: Color(0xFFAEB8C8)),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _emergencyAddButton() {
+    return GestureDetector(
+      onTap: () => _showEditEmergencyContactDialog(null),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF8FAFC),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFE2E8F0)),
+        ),
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.add_rounded, size: 18, color: Color(0xFF4F46E5)),
+            SizedBox(width: 6),
+            Text('연락처 추가', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: Color(0xFF4F46E5))),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showEditEmergencyContactDialog(EmergencyContact? existing) {
+    final isNew = existing == null;
+    final nameCtrl = TextEditingController(text: existing?.name ?? '');
+    final phoneCtrl = TextEditingController(text: existing?.phone ?? '');
+    final categoryCtrl = TextEditingController(text: existing?.category ?? '');
+
+    final contacts = ref.read(emergencyContactsProvider).valueOrNull ?? [];
+    final categories = contacts.map((c) => c.category).toSet().toList();
+
+    showDialog(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              backgroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: Text(
+                isNew ? '연락처 추가' : '연락처 수정',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF0F172A)),
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text('카테고리', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF64748B))),
+                    const SizedBox(height: 6),
+                    if (categories.isNotEmpty) ...[
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: categories.map((cat) {
+                          final selected = categoryCtrl.text == cat;
+                          return GestureDetector(
+                            onTap: () => setDialogState(() => categoryCtrl.text = cat),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: selected ? const Color(0xFF4F46E5) : const Color(0xFFF1F5F9),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                cat,
+                                style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: selected ? Colors.white : const Color(0xFF475569)),
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    _dialogTextField(categoryCtrl, '새 카테고리 입력 또는 위에서 선택'),
+                    const SizedBox(height: 14),
+                    const Text('이름', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF64748B))),
+                    const SizedBox(height: 6),
+                    _dialogTextField(nameCtrl, '예: 크루버스 홍길동 과장'),
+                    const SizedBox(height: 14),
+                    const Text('전화번호', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF64748B))),
+                    const SizedBox(height: 6),
+                    _dialogTextField(phoneCtrl, '010-0000-0000', textInputType: TextInputType.phone),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('취소', style: TextStyle(color: Color(0xFF94A3B8), fontWeight: FontWeight.w600)),
+                ),
+                TextButton(
+                  onPressed: () {
+                    final name = nameCtrl.text.trim();
+                    final phone = phoneCtrl.text.trim();
+                    final category = categoryCtrl.text.trim();
+                    if (name.isEmpty || phone.isEmpty || category.isEmpty) return;
+
+                    final contacts = ref.read(emergencyContactsProvider).valueOrNull ?? [];
+                    final maxOrder = contacts.isEmpty ? 0 : contacts.map((c) => c.order).reduce((a, b) => a > b ? a : b);
+
+                    final contact = EmergencyContact(
+                      id: existing?.id ?? const Uuid().v4(),
+                      category: category,
+                      name: name,
+                      phone: phone,
+                      order: existing?.order ?? maxOrder + 1,
+                    );
+                    ChatFirestoreRepository.saveEmergencyContact(contact);
+                    Navigator.pop(ctx);
+                  },
+                  child: Text(isNew ? '추가' : '저장', style: const TextStyle(color: Color(0xFF4F46E5), fontWeight: FontWeight.w700)),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _dialogTextField(TextEditingController ctrl, String hint, {TextInputType? textInputType}) {
+    return TextField(
+      controller: ctrl,
+      keyboardType: textInputType,
+      style: const TextStyle(fontSize: 14, color: Color(0xFF0F172A)),
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle: const TextStyle(fontSize: 13, color: Color(0xFFCBD5E1)),
+        filled: true,
+        fillColor: const Color(0xFFF8FAFC),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFFE2E8F0))),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFFE2E8F0))),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFF4F46E5), width: 1.5)),
+      ),
+    );
+  }
+
+  void _confirmDeleteEmergencyContact(EmergencyContact contact) {
+    showDialog(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('연락처 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF0F172A))),
+        content: Text('${contact.name}을(를) 삭제하시겠어요?', style: const TextStyle(fontSize: 14, color: Color(0xFF475569))),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('취소', style: TextStyle(color: Color(0xFF94A3B8), fontWeight: FontWeight.w600)),
+          ),
+          TextButton(
+            onPressed: () {
+              ChatFirestoreRepository.deleteEmergencyContact(contact.id);
+              Navigator.pop(ctx);
+            },
+            child: const Text('삭제', style: TextStyle(color: Color(0xFFEF4444), fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+  }
 
   // ─── 앱 설정 패널 ─────────────────────────────────────────────
   Widget _buildSettingsPanel(dynamic user) {
@@ -1771,17 +2381,23 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
                     _settingsSwitchTile(
                       icon: Icons.notifications_none_rounded,
                       title: '알림 소리',
-                      subtitle: '메시지 알림음',
+                      subtitle: '앱 사용 중 새 메시지 알림음',
                       value: _settingNotifSound,
-                      onChanged: (v) => setState(() => _settingNotifSound = v),
+                      onChanged: (v) async {
+                        setState(() => _settingNotifSound = v);
+                        await UserSessionStorage.setMessageNotifSoundEnabled(v);
+                      },
                       showDivider: true,
                     ),
                     _settingsSwitchTile(
                       icon: Icons.vibration_rounded,
                       title: '진동',
-                      subtitle: '메시지 수신 시',
+                      subtitle: '메시지 수신 시 (앱 사용 중)',
                       value: _settingVibration,
-                      onChanged: (v) => setState(() => _settingVibration = v),
+                      onChanged: (v) async {
+                        setState(() => _settingVibration = v);
+                        await UserSessionStorage.setMessageNotifVibrateEnabled(v);
+                      },
                       showDivider: true,
                     ),
                     Padding(
@@ -2103,11 +2719,47 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
                   ),
                   alignment: Alignment.center,
                   child: Text(
-                    '솔라티(하청)',
+                    '솔라티',
                     style: TextStyle(
                       fontSize: 13.5,
                       fontWeight: _newRoomType == RoomType.vendor ? FontWeight.w800 : FontWeight.w500,
                       color: _newRoomType == RoomType.vendor ? const Color(0xFF0F172A) : const Color(0xFF64748B),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Expanded(
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () => setState(() => _newRoomType = RoomType.maintenance),
+                borderRadius: BorderRadius.circular(11),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOutCubic,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  decoration: BoxDecoration(
+                    color: _newRoomType == RoomType.maintenance ? Colors.white : Colors.transparent,
+                    borderRadius: BorderRadius.circular(11),
+                    boxShadow: _newRoomType == RoomType.maintenance
+                        ? [
+                            BoxShadow(
+                              color: const Color(0xFF0F172A).withValues(alpha: 0.07),
+                              blurRadius: 10,
+                              offset: const Offset(0, 2),
+                            ),
+                          ]
+                        : null,
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    '정비',
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: _newRoomType == RoomType.maintenance ? FontWeight.w800 : FontWeight.w500,
+                      color: _newRoomType == RoomType.maintenance ? const Color(0xFF0F172A) : const Color(0xFF64748B),
                     ),
                   ),
                 ),
@@ -2145,7 +2797,7 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
             : '솔라티 채팅방에만 공지가 갑니다.');
     final compHint = _broadcastCompanies.isEmpty
         ? ' 소속을 고르지 않으면 해당 유형의 모든 채팅방에 보내요.'
-        : ' 선택한 소속 채팅방만 골라 보내요.';
+        : ' 선택한 소속이 방 설정에 연결된 채팅방만 받습니다. (소속 미지정 방 제외)';
     return typeHint + compHint;
   }
 
@@ -2214,12 +2866,14 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
 class _RoomItem extends StatefulWidget {
   final RoomModel room;
   final bool isAdmin;
+  final bool showPinnedBadge;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
 
   const _RoomItem({
     required this.room,
     required this.isAdmin,
+    required this.showPinnedBadge,
     required this.onTap,
     required this.onLongPress,
   });
@@ -2260,7 +2914,7 @@ class _RoomItemState extends State<_RoomItem> {
                         child: Text(room.id == 999 ? '📊' : '🗂', style: const TextStyle(fontSize: 24)),
                       )
                     : AvatarWidget(name: room.name),
-                if (room.pinned)
+                if (widget.showPinnedBadge)
                   const Positioned(
                     top: -4, right: -4,
                     child: Text('📌', style: TextStyle(fontSize: 10)),
@@ -2307,12 +2961,15 @@ class _RoomItemState extends State<_RoomItem> {
                   const SizedBox(height: 4),
                   Row(
                     children: [
-                      Expanded(
+                      ConstrainedBox(
+                        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.55),
                         child: Text(room.lastMsg,
                           style: const TextStyle(fontSize: 13, color: Color(0xFF333333)),
+                          maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                      const Spacer(),
                       if (room.unread > 0)
                         Container(
                           margin: const EdgeInsets.only(left: 8),

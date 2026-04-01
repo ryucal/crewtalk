@@ -18,6 +18,8 @@ final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
     refreshListenable: authRefresh,
     initialLocation: '/login',
+    // FCM 등이 잘못된 platform defaultRouteName 을 주면 노선명 등이 경로로 파싱되는 문제 방지
+    overridePlatformDefaultLocation: true,
     redirect: (context, state) {
       final user = ref.read(userProvider);
       final isLoggedIn = user != null;

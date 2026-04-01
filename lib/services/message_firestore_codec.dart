@@ -21,6 +21,8 @@ String messageTypeToWire(MessageType t) {
       return 'dbResult';
     case MessageType.summary:
       return 'summary';
+    case MessageType.maintenance:
+      return 'maintenance';
   }
 }
 
@@ -40,6 +42,8 @@ MessageType messageTypeFromWire(String? s) {
       return MessageType.dbResult;
     case 'summary':
       return MessageType.summary;
+    case 'maintenance':
+      return MessageType.maintenance;
     case 'text':
     default:
       return MessageType.text;
@@ -50,6 +54,8 @@ RoomType? roomTypeFromWire(String? s) {
   switch (s) {
     case 'vendor':
       return RoomType.vendor;
+    case 'maintenance':
+      return RoomType.maintenance;
     case 'normal':
       return RoomType.normal;
     default:
@@ -59,7 +65,14 @@ RoomType? roomTypeFromWire(String? s) {
 
 String? roomTypeToWire(RoomType? t) {
   if (t == null) return null;
-  return t == RoomType.vendor ? 'vendor' : 'normal';
+  switch (t) {
+    case RoomType.vendor:
+      return 'vendor';
+    case RoomType.maintenance:
+      return 'maintenance';
+    case RoomType.normal:
+      return 'normal';
+  }
 }
 
 Map<String, dynamic> _reportToMap(ReportData r) => {
@@ -114,7 +127,10 @@ Map<String, dynamic> _summaryLineToMap(SummaryLine l) => {
     };
 
 SummaryLine _summaryLineFromMap(dynamic raw) {
-  final m = Map<String, dynamic>.from(raw as Map);
+  if (raw is! Map) {
+    return const SummaryLine(name: '', total: 0, reported: false);
+  }
+  final m = Map<String, dynamic>.from(raw);
   final subs = (m['subLines'] as List<dynamic>?) ?? [];
   return SummaryLine(
     name: m['name'] as String? ?? '',
@@ -157,6 +173,41 @@ DbResultCard? _dbResultFromMap(dynamic raw) {
   );
 }
 
+Map<String, dynamic> _maintenanceToMap(MaintenanceData m) => {
+      'car': m.car,
+      'driverName': m.driverName,
+      'phone': m.phone,
+      'occurredAt': m.occurredAt,
+      'symptom': m.symptom,
+      'driveability': m.driveability,
+      'photoUrls': m.photoUrls,
+      'specialNote': m.specialNote,
+      'status': m.status,
+    };
+
+MaintenanceData? _maintenanceFromMap(dynamic raw) {
+  if (raw is! Map) return null;
+  final m = Map<String, dynamic>.from(raw);
+  final photos = <String>[];
+  final rawPhotos = m['photoUrls'];
+  if (rawPhotos is List) {
+    for (final e in rawPhotos) {
+      if (e is String && e.trim().isNotEmpty) photos.add(e);
+    }
+  }
+  return MaintenanceData(
+    car: m['car'] as String? ?? '',
+    driverName: m['driverName'] as String? ?? '',
+    phone: m['phone'] as String? ?? '',
+    occurredAt: m['occurredAt'] as String? ?? '',
+    symptom: m['symptom'] as String? ?? '',
+    driveability: m['driveability'] as String? ?? '',
+    photoUrls: photos,
+    specialNote: m['specialNote'] as String? ?? '',
+    status: m['status'] as String? ?? '접수',
+  );
+}
+
 Map<String, dynamic> reactionsToFirestore(Map<String, List<String>> r) {
   final out = <String, dynamic>{};
   for (final e in r.entries) {
@@ -182,6 +233,17 @@ Map<String, List<String>> reactionsFromFirestore(dynamic raw) {
 class MessageFirestoreCodec {
   MessageFirestoreCodec._();
 
+  static Map<String, dynamic> _imageWireFields(MessageModel m) {
+    final src = m.imageSources;
+    if (src.isEmpty) {
+      return {'imageUrl': null, 'imageUrls': null};
+    }
+    return {
+      'imageUrl': src.first,
+      'imageUrls': src.length > 1 ? src : null,
+    };
+  }
+
   static Map<String, dynamic> toDocumentFields(MessageModel m) {
     return {
       'clientId': m.id,
@@ -191,15 +253,18 @@ class MessageFirestoreCodec {
       'car': m.car,
       'route': m.route,
       'subRoute': m.subRoute,
-      'text': m.text,
+      'text': m.text ?? '',
       'time': m.time,
       'date': m.date,
       'type': messageTypeToWire(m.type),
       'reportData': m.reportData != null ? _reportToMap(m.reportData!) : null,
       'reactions': reactionsToFirestore(m.reactions),
       'vendorData': m.vendorData != null ? _vendorToMap(m.vendorData!) : null,
-      'imageUrl': m.imageUrl,
+      'maintenanceData': m.maintenanceData != null ? _maintenanceToMap(m.maintenanceData!) : null,
+      ..._imageWireFields(m),
       'phone': m.phone,
+      'company': m.company,
+      'carLast4': m.carLast4,
       'emergencyType': m.emergencyType,
       'resultCard': _dbResultToMap(m.resultCard),
       'morningLines': m.morningLines?.map(_summaryLineToMap).toList(),
@@ -221,10 +286,31 @@ class MessageFirestoreCodec {
     final uid = d['userId'] as String? ?? '';
     final isMe = myFirebaseUid != null && myFirebaseUid.isNotEmpty && uid == myFirebaseUid;
     final clientId = (d['clientId'] as num?)?.toInt() ?? doc.id.hashCode.abs();
+    int? createdAtMs;
+    final ca = d['createdAt'];
+    if (ca is Timestamp) {
+      createdAtMs = ca.millisecondsSinceEpoch;
+    }
+
+    List<String> parsedImgUrls = [];
+    final rawUrls = d['imageUrls'];
+    if (rawUrls is List) {
+      for (final e in rawUrls) {
+        if (e is String && e.trim().isNotEmpty) parsedImgUrls.add(e);
+      }
+    }
+    if (parsedImgUrls.isEmpty) {
+      final one = d['imageUrl'] as String?;
+      if (one != null && one.trim().isNotEmpty) parsedImgUrls = [one];
+    }
+    final parsedImageUrl = parsedImgUrls.isNotEmpty ? parsedImgUrls.first : null;
+    final parsedImageUrlsMulti =
+        parsedImgUrls.length > 1 ? List<String>.from(parsedImgUrls) : const <String>[];
 
     return MessageModel(
       id: clientId,
       firestoreDocId: doc.id,
+      createdAtMs: createdAtMs,
       userId: uid,
       name: d['name'] as String? ?? '',
       avatar: d['avatar'] as String?,
@@ -239,8 +325,12 @@ class MessageFirestoreCodec {
       reportData: _reportFromMap(d['reportData']),
       reactions: reactionsFromFirestore(d['reactions']),
       vendorData: _vendorFromMap(d['vendorData']),
-      imageUrl: d['imageUrl'] as String?,
+      maintenanceData: _maintenanceFromMap(d['maintenanceData']),
+      imageUrl: parsedImageUrl,
+      imageUrls: parsedImageUrlsMulti,
       phone: d['phone'] as String?,
+      company: d['company'] as String?,
+      carLast4: d['carLast4'] as String?,
       emergencyType: d['emergencyType'] as String?,
       resultCard: _dbResultFromMap(d['resultCard']),
       morningLines: (d['morningLines'] as List<dynamic>?)?.map(_summaryLineFromMap).toList(),

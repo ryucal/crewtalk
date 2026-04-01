@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -7,6 +8,7 @@ import '../providers/app_provider.dart';
 import '../providers/company_directory_provider.dart';
 import '../services/auth_repository.dart';
 import '../utils/app_colors.dart';
+import '../utils/sample_data.dart';
 import '../widgets/auth_form_widgets.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
@@ -30,8 +32,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   String _error = '';
   bool _loading = false;
 
-  static const String _adminPassword = 'admin1234';
-
   @override
   void dispose() {
     _nameFocus.dispose();
@@ -46,23 +46,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
     if (_personalPassword.trim().isEmpty) {
       setState(() => _error = '개인 비밀번호를 입력해주세요');
-      return;
-    }
-
-    // 레거시 관리자 (Firebase 없이도 동작)
-    if (_personalPassword == _adminPassword) {
-      if (_name.trim().isEmpty) {
-        setState(() => _error = '이름을 입력해주세요');
-        return;
-      }
-      await ref.read(userProvider.notifier).login(UserModel(
-        name: _name.trim(),
-        phone: _phone,
-        company: '관리자',
-        isAdmin: true,
-      ));
-      if (!mounted) return;
-      context.go('/rooms');
       return;
     }
 
@@ -120,8 +103,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       return;
     }
 
-    final companies = ref.read(companyProvider);
-    final isValid = companies.any((c) => c.name == _company && c.password == _companyPassword);
+    final companyNames = ref.read(companyNamesForAuthProvider).valueOrNull ?? [];
+    final isValid = companyNames.contains(_company) && sampleCompanies.any((c) => c.name == _company && c.password == _companyPassword);
     if (!isValid) {
       setState(() => _error = '소속 비밀번호가 올바르지 않아요');
       return;
@@ -140,7 +123,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   Widget build(BuildContext context) {
     final firebaseOn = AuthRepository.firebaseAvailable;
     final companyNamesAsync = ref.watch(companyNamesForAuthProvider);
-    final legacyCompanies = ref.watch(companyProvider);
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -213,6 +195,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     placeholder: '개인 비밀번호',
                     focusNode: _personalPwFocus,
                     obscureText: true,
+                    keyboardType: const TextInputType.numberWithOptions(signed: false, decimal: false),
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                     onChanged: (v) => setState(() {
                       _personalPassword = v;
                       _error = '';
@@ -221,33 +205,33 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   ),
                   const SizedBox(height: 8),
 
-                  if (firebaseOn)
-                    companyNamesAsync.when(
-                      data: (items) => AuthLineDropdown(
-                        label: '소속',
-                        value: _company.isEmpty ? null : _company,
-                        items: items,
-                        onChanged: (v) => setState(() {
-                          _company = v ?? '';
-                          _error = '';
-                        }),
-                      ),
-                      loading: () => const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 16),
-                        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-                      ),
-                      error: (_, __) => const Text('소속 목록을 불러오지 못했어요'),
-                    )
-                  else
-                    AuthLineDropdown(
-                      label: '소속',
-                      value: _company.isEmpty ? null : _company,
-                      items: legacyCompanies.map((c) => c.name).toList(),
-                      onChanged: (v) => setState(() {
-                        _company = v ?? '';
-                        _error = '';
-                      }),
+                  companyNamesAsync.when(
+                    data: (items) => items.isEmpty
+                        ? Text(
+                            firebaseOn
+                                ? '등록된 소속이 없어요. 관리자가 Firebase에서 소속 목록을 동기화한 뒤 다시 시도해 주세요.'
+                                : '소속 목록이 비어 있어요.',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Colors.black.withValues(alpha: 0.65),
+                              height: 1.35,
+                            ),
+                          )
+                        : AuthLineDropdown(
+                            label: '소속',
+                            value: _company.isEmpty ? null : _company,
+                            items: items,
+                            onChanged: (v) => setState(() {
+                              _company = v ?? '';
+                              _error = '';
+                            }),
+                          ),
+                    loading: () => const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
                     ),
+                    error: (_, __) => const Text('소속 목록을 불러오지 못했어요'),
+                  ),
                   const SizedBox(height: 8),
 
                   AuthLineField(
@@ -255,6 +239,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     placeholder: '소속 공통 비밀번호',
                     focusNode: _companyPwFocus,
                     obscureText: true,
+                    keyboardType: const TextInputType.numberWithOptions(signed: false, decimal: false),
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                     onChanged: (v) => setState(() {
                       _companyPassword = v;
                       _error = '';
