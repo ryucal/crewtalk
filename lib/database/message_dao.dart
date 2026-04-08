@@ -16,7 +16,15 @@ extension MessageDao on AppDatabase {
           ..limit(limit))
         .get();
     return rows.reversed
-        .map((r) => MessageModel.fromJsonString(r.jsonData, currentUid: currentUid))
+        .map((r) {
+          try {
+            return MessageModel.fromJsonString(r.jsonData, currentUid: currentUid);
+          } catch (_) {
+            (delete(cachedMessages)..where((t) => t.firestoreDocId.equals(r.firestoreDocId))).go();
+            return null;
+          }
+        })
+        .whereType<MessageModel>()
         .toList();
   }
 
@@ -34,7 +42,15 @@ extension MessageDao on AppDatabase {
           ..limit(limit))
         .get();
     return rows.reversed
-        .map((r) => MessageModel.fromJsonString(r.jsonData, currentUid: currentUid))
+        .map((r) {
+          try {
+            return MessageModel.fromJsonString(r.jsonData, currentUid: currentUid);
+          } catch (_) {
+            (delete(cachedMessages)..where((t) => t.firestoreDocId.equals(r.firestoreDocId))).go();
+            return null;
+          }
+        })
+        .whereType<MessageModel>()
         .toList();
   }
 

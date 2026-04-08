@@ -10,6 +10,7 @@ import '../models/emergency_contact.dart';
 import '../models/message_model.dart';
 import '../models/room_model.dart';
 import '../models/room_kakao_nav_link.dart';
+import '../models/global_timetable_visibility.dart';
 import 'auth_repository.dart';
 import 'message_firestore_codec.dart';
 
@@ -27,6 +28,10 @@ class ChatFirestoreRepository {
   /// 방별 카카오맵 공유 링크: `config/kakao_nav_links` → `rooms.{roomId}` 배열 (쓰기: 슈퍼만 rules)
   static DocumentReference<Map<String, dynamic>> get _kakaoNavConfig =>
       _db.collection('config').doc('kakao_nav_links');
+
+  /// 전체 방 공통 배차표 슬롯 노출 예약: `config/timetable_visibility` (쓰기: isElevatedAdmin)
+  static DocumentReference<Map<String, dynamic>> get _timetableVisibilityConfig =>
+      _db.collection('config').doc('timetable_visibility');
 
   static bool get _ok => AuthRepository.firebaseAvailable;
 
@@ -154,6 +159,93 @@ class ChatFirestoreRepository {
   static Stream<Map<int, List<RoomKakaoNavLink>>> watchKakaoNavLinks() {
     if (!_ok) return const Stream.empty();
     return _kakaoNavConfig.snapshots().map((s) => _kakaoNavMapFromData(s.data()));
+  }
+
+  /// `config/timetable_visibility` 실시간 구독 — 날짜별 슬롯 노출 규칙
+  static Stream<GlobalTimetableByDate> watchGlobalTimetableVisibility() {
+    if (!_ok) return Stream.value({});
+    return _timetableVisibilityConfig.snapshots().map(
+          (s) => globalTimetableFromFirestore(s.data()),
+        );
+  }
+
+  static final RegExp _timetableDateKeyRe = RegExp(r'^\d{4}-\d{2}-\d{2}$');
+
+  /// 한 날짜(KST `YYYY-MM-DD`)에 슬롯 노출 예약. 전체 채팅방에 적용됩니다.
+  /// `update()`는 점 표기법을 중첩 필드 경로로 해석하므로 `byDate.{dateKey}`가 올바르게 갱신됩니다.
+  /// 문서가 아직 없으면 `set()`으로 올바른 중첩 구조를 생성합니다.
+  static Future<void> setGlobalTimetableDay(
+    String dateKey, {
+    required bool slot1Visible,
+    required bool slot2Visible,
+  }) async {
+    if (!_ok) return;
+    final payload = <String, dynamic>{
+      'byDate.$dateKey': {
+        'slot1': slot1Visible,
+        'slot2': slot2Visible,
+      },
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+    try {
+      await _timetableVisibilityConfig.update(payload);
+    } on FirebaseException catch (e) {
+      if (e.code == 'not-found') {
+        await _timetableVisibilityConfig.set({
+          'byDate': {
+            dateKey: {'slot1': slot1Visible, 'slot2': slot2Visible},
+          },
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      } else {
+        rethrow;
+      }
+    }
+  }
+
+  /// 해당 날짜 규칙 삭제 → 그날은 기본(이미지 있으면 노출) 동작
+  static Future<void> removeGlobalTimetableDay(String dateKey) async {
+    if (!_ok) return;
+    try {
+      await _timetableVisibilityConfig.update({
+        'byDate.$dateKey': FieldValue.delete(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } on FirebaseException catch (e) {
+      if (e.code == 'not-found') return;
+      if (kDebugMode) debugPrint('removeGlobalTimetableDay: ${e.code} ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// [todayKstKey](`YYYY-MM-DD`, KST) **이전** 날짜 키를 `byDate`에서 제거합니다.
+  static Future<void> prunePastGlobalTimetableDays(String todayKstKey) async {
+    if (!_ok) return;
+    try {
+      final snap = await _timetableVisibilityConfig.get();
+      final data = snap.data();
+      if (data == null) return;
+      final raw = data['byDate'];
+      if (raw is! Map) return;
+      final keysToRemove = <String>[];
+      for (final e in raw.keys) {
+        final ks = e.toString();
+        if (_timetableDateKeyRe.hasMatch(ks) && ks.compareTo(todayKstKey) < 0) {
+          keysToRemove.add(ks);
+        }
+      }
+      if (keysToRemove.isEmpty) return;
+      final updates = <String, dynamic>{
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+      for (final k in keysToRemove) {
+        updates['byDate.$k'] = FieldValue.delete();
+      }
+      await _timetableVisibilityConfig.update(updates);
+    } on FirebaseException catch (e) {
+      if (e.code == 'not-found') return;
+      if (kDebugMode) debugPrint('prunePastGlobalTimetableDays: ${e.code} ${e.message}');
+    }
   }
 
   /// 슈퍼관리자 전용 — 해당 방의 링크 목록 전체를 덮어씀
@@ -612,7 +704,10 @@ class ChatFirestoreRepository {
     required String newText,
   }) async {
     if (!_ok) return;
-    await _rooms.doc(roomDocId).collection('messages').doc(messageDocId).update({'text': newText});
+    await _rooms.doc(roomDocId).collection('messages').doc(messageDocId).update({
+      'text': newText,
+      'editedAt': FieldValue.serverTimestamp(),
+    });
   }
 
   static Future<void> updateReportData({
@@ -636,12 +731,21 @@ class ChatFirestoreRepository {
         'maxCount': maxCount,
         'isOverCapacity': count >= maxCount,
       },
+      'editedAt': FieldValue.serverTimestamp(),
     });
   }
 
   static Future<void> deleteMessage(String roomDocId, String messageDocId) async {
     if (!_ok) return;
     await _rooms.doc(roomDocId).collection('messages').doc(messageDocId).delete();
+  }
+
+  static Future<void> softDeleteMessage(String roomDocId, String messageDocId) async {
+    if (!_ok) return;
+    await _rooms.doc(roomDocId).collection('messages').doc(messageDocId).update({
+      'isDeleted': true,
+      'deletedAt': FieldValue.serverTimestamp(),
+    });
   }
 
   static Future<void> updateMaintenanceStatus({

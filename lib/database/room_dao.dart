@@ -9,7 +9,17 @@ extension RoomDao on AppDatabase {
     final rows = await (select(cachedRooms)
           ..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]))
         .get();
-    return rows.map((r) => RoomModel.fromJsonString(r.jsonData)).toList();
+    return rows
+        .map((r) {
+          try {
+            return RoomModel.fromJsonString(r.jsonData);
+          } catch (_) {
+            (delete(cachedRooms)..where((t) => t.id.equals(r.id))).go();
+            return null;
+          }
+        })
+        .whereType<RoomModel>()
+        .toList();
   }
 
   /// 방 목록을 upsert (Firestore watchRooms 스냅샷 수신 시 호출).

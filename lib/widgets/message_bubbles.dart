@@ -279,7 +279,7 @@ class _MessageBubbleState extends State<MessageBubble> {
     final canEditText = widget.isAdmin && _textEditableTypes.contains(msg.type);
     final canEditReport = widget.isAdmin && msg.type == MessageType.report && widget.onEditReport != null;
     final canEdit = canEditText || canEditReport;
-    final canDelete = widget.isAdmin || msg.isMe;
+    final canDelete = widget.isAdmin;
     if (!canEdit && !canDelete) return;
 
     showDialog(
@@ -336,6 +336,7 @@ class _MessageBubbleState extends State<MessageBubble> {
 
   @override
   Widget build(BuildContext context) {
+    if (msg.isDeleted) return _buildDeletedPlaceholder();
     switch (msg.type) {
       case MessageType.dbResult:     return _buildDbResult();
       case MessageType.summary:      return _buildSummary();
@@ -347,6 +348,34 @@ class _MessageBubbleState extends State<MessageBubble> {
       case MessageType.report:       return _buildReport();
       case MessageType.text:         return _buildText();
     }
+  }
+
+  Widget _buildDeletedPlaceholder() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        mainAxisAlignment: msg.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+        children: [
+          if (!msg.isMe) const SizedBox(width: 44),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            constraints: const BoxConstraints(maxWidth: 260),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF5F5F5),
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: const Text(
+              '삭제된 메시지입니다',
+              style: TextStyle(
+                fontSize: 13,
+                color: Color(0xFF999999),
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   // ─── 1. 일반 텍스트 ─────────────────────────────────────────
@@ -384,7 +413,18 @@ class _MessageBubbleState extends State<MessageBubble> {
                               ),
                               boxShadow: const [BoxShadow(color: Color(0x14000000), blurRadius: 3, offset: Offset(0, 1))],
                             ),
-                            child: Text(msg.text ?? '', style: const TextStyle(fontSize: 15, color: Colors.black, height: 1.5)),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(msg.text ?? '', style: const TextStyle(fontSize: 15, color: Colors.black, height: 1.5)),
+                                if (msg.editedAtMs != null)
+                                  const Padding(
+                                    padding: EdgeInsets.only(top: 2),
+                                    child: Text('(수정됨)', style: TextStyle(fontSize: 10, color: Color(0xFF999999), fontStyle: FontStyle.italic)),
+                                  ),
+                              ],
+                            ),
                           ),
                         ),
                         if (!msg.isMe) ...[const SizedBox(width: 4), _timeText()],
@@ -502,24 +542,32 @@ class _MessageBubbleState extends State<MessageBubble> {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     Flexible(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                        constraints: const BoxConstraints(maxWidth: 260),
-                        decoration: BoxDecoration(
-                          color: AppColors.noticeBackground,
-                          border: Border.all(color: AppColors.noticeBorder, width: 0.5),
-                          borderRadius: const BorderRadius.only(
-                            topLeft: Radius.circular(4), topRight: Radius.circular(16),
-                            bottomLeft: Radius.circular(16), bottomRight: Radius.circular(16),
+                      child: GestureDetector(
+                        onLongPress: _showReactionDialog,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          constraints: const BoxConstraints(maxWidth: 260),
+                          decoration: BoxDecoration(
+                            color: AppColors.noticeBackground,
+                            border: Border.all(color: AppColors.noticeBorder, width: 0.5),
+                            borderRadius: const BorderRadius.only(
+                              topLeft: Radius.circular(4), topRight: Radius.circular(16),
+                              bottomLeft: Radius.circular(16), bottomRight: Radius.circular(16),
+                            ),
                           ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('📢 전체 공지', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.noticePurple, letterSpacing: 0.4)),
-                            const SizedBox(height: 4),
-                            Text(msg.text ?? '', style: const TextStyle(fontSize: 14, color: AppColors.noticeDeep, height: 1.55)),
-                          ],
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('📢 전체 공지', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.noticePurple, letterSpacing: 0.4)),
+                              const SizedBox(height: 4),
+                              Text(msg.text ?? '', style: const TextStyle(fontSize: 14, color: AppColors.noticeDeep, height: 1.55)),
+                              if (msg.editedAtMs != null)
+                                const Padding(
+                                  padding: EdgeInsets.only(top: 2),
+                                  child: Text('(수정됨)', style: TextStyle(fontSize: 10, color: Color(0xFF999999), fontStyle: FontStyle.italic)),
+                                ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -676,66 +724,70 @@ class _MessageBubbleState extends State<MessageBubble> {
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Container(
-          constraints: BoxConstraints(maxWidth: maxW),
-          decoration: BoxDecoration(
-            color: const Color(0xFFFFF5F5),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: const Color(0xFFFFCDD2)),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Padding(
-                padding: EdgeInsets.only(top: 1),
-                child: Icon(Icons.emergency_rounded, size: 16, color: Color(0xFFC62828)),
-              ),
-              const SizedBox(width: 8),
-              Flexible(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+        child: GestureDetector(
+          onLongPress: _showReactionDialog,
+          child: Container(
+            constraints: BoxConstraints(maxWidth: maxW),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFF5F5),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFFFFCDD2)),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 8,
+                  runSpacing: 4,
                   children: [
+                    const Icon(Icons.emergency_rounded, size: 16, color: Color(0xFFC62828)),
                     Text(
                       emergencyType.isNotEmpty ? '긴급 호출 · $emergencyType' : '긴급 호출',
+                      textAlign: TextAlign.center,
                       style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFFC62828)),
-                    ),
-                    const SizedBox(height: 3),
-                    Wrap(
-                      spacing: 5,
-                      runSpacing: 2,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        if (name.isNotEmpty)
-                          Text(name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF1A1A1A))),
-                        if (phone.isNotEmpty)
-                          GestureDetector(
-                            onTap: () => _dialEmergencyPhone(phone),
-                            child: Text(
-                              phone,
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: AppColors.morningBlue,
-                                decoration: TextDecoration.underline,
-                                decorationColor: AppColors.morningBlue.withValues(alpha: 0.5),
-                              ),
-                            ),
-                          ),
-                        if (detail.isNotEmpty)
-                          Text(detail, style: TextStyle(fontSize: 12, color: AppColors.textHint)),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: Text(msg.time, style: TextStyle(fontSize: 11, color: AppColors.textHint.withValues(alpha: 0.9))),
                     ),
                   ],
                 ),
-              ),
-            ],
+                const SizedBox(height: 3),
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 5,
+                  runSpacing: 2,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    if (name.isNotEmpty)
+                      Text(name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF1A1A1A))),
+                    if (phone.isNotEmpty)
+                      GestureDetector(
+                        onTap: () => _dialEmergencyPhone(phone),
+                        child: Text(
+                          phone,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.morningBlue,
+                            decoration: TextDecoration.underline,
+                            decorationColor: AppColors.morningBlue.withValues(alpha: 0.5),
+                          ),
+                        ),
+                      ),
+                    if (detail.isNotEmpty)
+                      Text(
+                        detail,
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF1A1A1A)),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(msg.time, style: TextStyle(fontSize: 11, color: AppColors.textHint.withValues(alpha: 0.9))),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -746,26 +798,80 @@ class _MessageBubbleState extends State<MessageBubble> {
   Widget _buildVendorReport() {
     final vd = msg.vendorData;
     if (vd == null) return const SizedBox.shrink();
-    const headerBg = AppColors.adminIndigo;
 
-    Widget row(String k, String v, {bool emphasize = false}) => Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 72,
-            child: Text(k, style: TextStyle(fontSize: 12, color: emphasize ? const Color(0xFF333333) : const Color(0xFF888888), fontWeight: FontWeight.w600)),
-          ),
-          Expanded(
-            child: Text(
-              v.isEmpty ? '—' : v,
-              style: TextStyle(fontSize: 13, fontWeight: emphasize ? FontWeight.w700 : FontWeight.w500, color: const Color(0xFF222222), height: 1.25),
+    const ink = Color(0xFF0F172A);
+    const muted = Color(0xFF64748B);
+    const label = Color(0xFF94A3B8);
+    const hairline = Color(0xFFE8ECF0);
+    const softSurface = Color(0xFFF8FAFC);
+    const statTile = Color(0xFFF1F5F9);
+
+    final distanceDisplay = vd.distanceKm.isEmpty
+        ? ''
+        : (vd.distanceKm.toLowerCase().contains('km') ? vd.distanceKm : '${vd.distanceKm} km');
+
+    Widget detailRow(String k, String v) {
+      final show = v.isEmpty ? '—' : v;
+      return Padding(
+        padding: const EdgeInsets.only(top: 12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 56,
+              child: Text(k, style: const TextStyle(fontSize: 12, color: label, height: 1.35)),
             ),
-          ),
-        ],
-      ),
-    );
+            Expanded(
+              child: Text(
+                show,
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: ink, height: 1.35),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget endpointColumn(String title, String value) {
+      return Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: label)),
+            const SizedBox(height: 4),
+            Text(
+              value.isEmpty ? '—' : value,
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: ink, height: 1.3),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget statTileChild(String title, String value) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+        decoration: BoxDecoration(
+          color: statTile,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: const TextStyle(fontSize: 11, color: muted)),
+            const SizedBox(height: 2),
+            Text(
+              value.isEmpty ? '—' : value,
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: ink, height: 1.2),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final carLine = (msg.car != null && msg.car!.trim().isNotEmpty)
+        ? '운행 인원 보고 · ${msg.car!.trim()}'
+        : '운행 인원 보고';
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
@@ -787,55 +893,127 @@ class _MessageBubbleState extends State<MessageBubble> {
                     GestureDetector(
                       onLongPress: _showReactionDialog,
                       child: Container(
-                        constraints: const BoxConstraints(maxWidth: 280),
+                        constraints: const BoxConstraints(maxWidth: 292),
                         decoration: BoxDecoration(
                           color: Colors.white,
-                          border: Border.all(color: const Color(0xFFE0E0E0), width: 1.5),
-                          borderRadius: BorderRadius.circular(16),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: hairline),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.06),
+                              blurRadius: 14,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
                         ),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(14),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Icon(
+                                    Icons.apartment_outlined,
+                                    size: 20,
+                                    color: AppColors.adminIndigo.withValues(alpha: 0.88),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      vd.company,
+                                      style: const TextStyle(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w700,
+                                        color: ink,
+                                        height: 1.25,
+                                      ),
+                                    ),
+                                  ),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: AppColors.adminIndigoBg,
+                                      borderRadius: BorderRadius.circular(20),
+                                    ),
+                                    child: Text(
+                                      '솔라티',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w700,
+                                        color: AppColors.adminIndigo.withValues(alpha: 0.92),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.only(left: 28, top: 4),
+                                child: Text(
+                                  carLine,
+                                  style: const TextStyle(fontSize: 12, color: muted, height: 1.3),
+                                ),
+                              ),
+                              const SizedBox(height: 14),
                               Container(
-                                color: headerBg,
-                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                width: double.infinity,
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                decoration: BoxDecoration(
+                                  color: softSurface,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Row(
-                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                      children: [
-                                        Flexible(
-                                          child: Text('🏢 ${vd.company}', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: Colors.white)),
-                                        ),
-                                        Container(
-                                          margin: const EdgeInsets.only(left: 8),
-                                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
-                                          decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(12)),
-                                          child: const Text('솔라티', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white)),
-                                        ),
-                                      ],
+                                    const Text(
+                                      '운행일시',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                        color: label,
+                                        letterSpacing: -0.1,
+                                      ),
                                     ),
                                     const SizedBox(height: 4),
                                     Text(
-                                      (msg.car != null && msg.car!.trim().isNotEmpty)
-                                          ? '운행 인원 보고 · ${msg.car!.trim()}'
-                                          : '운행 인원 보고',
-                                      style: const TextStyle(fontSize: 11, color: Colors.white70),
+                                      vd.operationDateTime.isEmpty ? '—' : vd.operationDateTime,
+                                      style: const TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w700,
+                                        color: ink,
+                                        height: 1.25,
+                                      ),
                                     ),
                                   ],
                                 ),
                               ),
-                              row('운행일시', vd.operationDateTime, emphasize: true),
-                              const Divider(height: 1, color: Color(0xFFF0F0F0)),
-                              row('출발지', vd.departure),
-                              row('도착지', vd.destination),
-                              row('탑승인원', vd.passengerCount),
-                              row('이동거리', vd.distanceKm.isEmpty ? '' : (vd.distanceKm.toLowerCase().contains('km') ? vd.distanceKm : '${vd.distanceKm} km')),
-                              row('예약자', vd.reserver),
-                              row('특이사항', vd.specialNote),
+                              const SizedBox(height: 12),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  endpointColumn('출발지', vd.departure),
+                                  Padding(
+                                    padding: const EdgeInsets.only(left: 6, right: 6, top: 18),
+                                    child: Icon(
+                                      Icons.arrow_forward_rounded,
+                                      size: 16,
+                                      color: Colors.blueGrey.shade200,
+                                    ),
+                                  ),
+                                  endpointColumn('도착지', vd.destination),
+                                ],
+                              ),
+                              const SizedBox(height: 10),
+                              Row(
+                                children: [
+                                  Expanded(child: statTileChild('탑승인원', vd.passengerCount)),
+                                  const SizedBox(width: 8),
+                                  Expanded(child: statTileChild('이동거리', distanceDisplay)),
+                                ],
+                              ),
+                              detailRow('예약자', vd.reserver),
+                              detailRow('특이사항', vd.specialNote),
                             ],
                           ),
                         ),
@@ -844,6 +1022,7 @@ class _MessageBubbleState extends State<MessageBubble> {
                     if (!msg.isMe) ...[const SizedBox(width: 4), _timeText(stripSeconds: true)],
                   ],
                 ),
+                if (_hasReactions()) _reactionBar(),
               ],
             ),
           ),
@@ -854,47 +1033,138 @@ class _MessageBubbleState extends State<MessageBubble> {
   }
 
   // ─── 7. 차량 정비 접수 카드 ──────────────────────────────────
+  Widget _buildMaintenanceConsumableSimple(MaintenanceData md) {
+    final line = md.consumableRequestDisplayLine;
+    if (line.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        mainAxisAlignment: msg.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!msg.isMe) ...[_avatar(), const SizedBox(width: 8)],
+          Flexible(
+            child: Column(
+              crossAxisAlignment: msg.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+              children: [
+                if (!msg.isMe) _senderName(),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    if (msg.isMe) ...[_timeText(stripSeconds: true), const SizedBox(width: 4)],
+                    GestureDetector(
+                      onLongPress: _showReactionDialog,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        constraints: const BoxConstraints(maxWidth: 280),
+                        decoration: BoxDecoration(
+                          color: msg.isMe ? AppColors.kakaoYellow : Colors.white,
+                          borderRadius: BorderRadius.only(
+                            topLeft: Radius.circular(msg.isMe ? 18 : 0),
+                            topRight: Radius.circular(msg.isMe ? 0 : 18),
+                            bottomLeft: const Radius.circular(18),
+                            bottomRight: const Radius.circular(18),
+                          ),
+                          boxShadow: const [BoxShadow(color: Color(0x14000000), blurRadius: 3, offset: Offset(0, 1))],
+                        ),
+                        child: Text(
+                          line,
+                          style: const TextStyle(fontSize: 15, color: Colors.black, height: 1.45),
+                        ),
+                      ),
+                    ),
+                    if (!msg.isMe) ...[const SizedBox(width: 4), _timeText(stripSeconds: true)],
+                  ],
+                ),
+                if (_hasReactions()) _reactionBar(),
+              ],
+            ),
+          ),
+          if (msg.isMe) const SizedBox(width: 8),
+        ],
+      ),
+    );
+  }
+
   Widget _buildMaintenance() {
     final md = msg.maintenanceData;
     if (md == null) return const SizedBox.shrink();
 
-    final Color urgencyColor;
-    final String urgencyIcon;
-    if (md.driveability == '즉시 점검 필요') {
-      urgencyColor = const Color(0xFFC62828);
-      urgencyIcon = '🚨';
-    } else if (md.driveability == '조심 운행 가능') {
-      urgencyColor = const Color(0xFFE65100);
-      urgencyIcon = '⚠️';
-    } else {
-      urgencyColor = const Color(0xFF2E7D32);
-      urgencyIcon = '✅';
+    if (md.consumableOnly && md.consumableItems.isNotEmpty) {
+      return _buildMaintenanceConsumableSimple(md);
     }
 
-    final Color statusColor;
-    final String statusLabel;
+    const border = Color(0xFFE2E8F0);
+    const ink = Color(0xFF0F172A);
+    const muted = Color(0xFF64748B);
+    const labelColor = Color(0xFF94A3B8);
+    const hairline = Color(0xFFF1F5F9);
+
+    late final Color urgencyBg;
+    late final Color urgencyFg;
+    late final IconData urgencyIconData;
+    if (md.driveability == '즉시 점검 필요') {
+      urgencyBg = const Color(0xFFFEF2F2);
+      urgencyFg = const Color(0xFFDC2626);
+      urgencyIconData = Icons.error_outline_rounded;
+    } else if (md.driveability == '조심 운행 가능') {
+      urgencyBg = const Color(0xFFFFF7ED);
+      urgencyFg = const Color(0xFFEA580C);
+      urgencyIconData = Icons.warning_amber_rounded;
+    } else {
+      urgencyBg = const Color(0xFFF0FDF4);
+      urgencyFg = const Color(0xFF16A34A);
+      urgencyIconData = Icons.check_circle_outline_rounded;
+    }
+
+    late final Color statusBg;
+    late final Color statusFg;
+    late final String statusLabel;
     if (md.status == '정비완료') {
-      statusColor = const Color(0xFF2E7D32);
+      statusBg = const Color(0xFFDCFCE7);
+      statusFg = const Color(0xFF15803D);
       statusLabel = '정비완료';
     } else if (md.status == '정비예정') {
-      statusColor = const Color(0xFF1565C0);
+      statusBg = const Color(0xFFDBEAFE);
+      statusFg = const Color(0xFF1D4ED8);
       statusLabel = '정비예정';
     } else {
-      statusColor = const Color(0xFF757575);
+      statusBg = const Color(0xFFF1F5F9);
+      statusFg = const Color(0xFF475569);
       statusLabel = '접수';
     }
 
-    Widget row(String k, String v) => Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+    Widget detailRow(String k, String v) => Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 72,
-            child: Text(k, style: const TextStyle(fontSize: 14, color: Color(0xFF888888), fontWeight: FontWeight.w600)),
+            width: 76,
+            child: Text(
+              k,
+              style: const TextStyle(
+                fontSize: 12,
+                height: 1.35,
+                letterSpacing: -0.1,
+                color: labelColor,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ),
           Expanded(
-            child: Text(v.isEmpty ? '—' : v, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: Color(0xFF222222), height: 1.25)),
+            child: Text(
+              v.isEmpty ? '—' : v,
+              style: const TextStyle(
+                fontSize: 15,
+                height: 1.35,
+                letterSpacing: -0.2,
+                fontWeight: FontWeight.w500,
+                color: ink,
+              ),
+            ),
           ),
         ],
       ),
@@ -920,104 +1190,180 @@ class _MessageBubbleState extends State<MessageBubble> {
                     GestureDetector(
                       onLongPress: _showReactionDialog,
                       child: Container(
-                      constraints: const BoxConstraints(maxWidth: 300),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        border: Border.all(color: const Color(0xFFE0E0E0), width: 1.5),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(14),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            // 헤더
-                            Container(
-                              color: const Color(0xFFE65100),
-                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      Flexible(
-                                        child: Text('🔧 ${md.car}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Colors.white)),
-                                      ),
-                                      Container(
-                                        margin: const EdgeInsets.only(left: 8),
-                                        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
-                                        decoration: BoxDecoration(color: statusColor.withValues(alpha: 0.9), borderRadius: BorderRadius.circular(12)),
-                                        child: Text(statusLabel, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.white)),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text('차량 정비 접수 · ${md.driverName}', style: const TextStyle(fontSize: 13, color: Colors.white70)),
-                                ],
-                              ),
+                        constraints: const BoxConstraints(maxWidth: 300),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(color: border),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.05),
+                              blurRadius: 20,
+                              offset: const Offset(0, 6),
                             ),
-                            // 정보 행
-                            row('발생일시', md.occurredAt),
-                            const Divider(height: 1, color: Color(0xFFF0F0F0)),
-                            row('고장증상', md.symptom),
-                            Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
-                              child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const SizedBox(width: 72, child: Text('운행여부', style: TextStyle(fontSize: 14, color: Color(0xFF888888), fontWeight: FontWeight.w600))),
-                                  Expanded(
-                                    child: Text('$urgencyIcon ${md.driveability}', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: urgencyColor, height: 1.25)),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            row('연락처', md.phone),
-                            if (md.specialNote.isNotEmpty)
-                              row('특이사항', md.specialNote),
-                            const SizedBox(height: 6),
-                            // 사진 썸네일
-                            if (md.photoUrls.isNotEmpty)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                                child: Wrap(
-                                  spacing: 6,
-                                  runSpacing: 6,
-                                  children: md.photoUrls.map((url) {
-                                    return GestureDetector(
-                                      onTap: () => widget.onOpenGallery(url),
-                                      child: ClipRRect(
-                                        borderRadius: BorderRadius.circular(8),
-                                        child: Image.network(url, width: 56, height: 56, fit: BoxFit.cover,
-                                          errorBuilder: (_, __, ___) => Container(
-                                            width: 56, height: 56, color: const Color(0xFFEEEEEE),
-                                            child: const Icon(Icons.broken_image, size: 20, color: Color(0xFFBBBBBB)),
-                                          ),
-                                        ),
-                                      ),
-                                    );
-                                  }).toList(),
-                                ),
-                              ),
-                            // 상태 체크 버튼
-                            if (widget.onMaintenanceStatusChanged != null)
-                              Padding(
-                                padding: const EdgeInsets.fromLTRB(10, 4, 10, 10),
-                                child: Row(
-                                  children: [
-                                    _maintenanceStatusBtn('정비예정', const Color(0xFF1565C0), md.status == '정비예정'),
-                                    const SizedBox(width: 6),
-                                    _maintenanceStatusBtn('정비완료', const Color(0xFF2E7D32), md.status == '정비완료'),
-                                  ],
-                                ),
-                              )
-                            else
-                              const SizedBox(height: 12),
                           ],
                         ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(17),
+                          child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                    Padding(
+                                      padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
+                                      child: Row(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  md.car,
+                                                  style: const TextStyle(
+                                                    fontSize: 17,
+                                                    height: 1.25,
+                                                    letterSpacing: -0.35,
+                                                    fontWeight: FontWeight.w700,
+                                                    color: ink,
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 4),
+                                                Text(
+                                                  '정비 예약 · ${md.driverName}',
+                                                  style: const TextStyle(
+                                                    fontSize: 13,
+                                                    height: 1.3,
+                                                    color: muted,
+                                                    fontWeight: FontWeight.w500,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          const SizedBox(width: 10),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                            decoration: BoxDecoration(
+                                              color: statusBg,
+                                              borderRadius: BorderRadius.circular(20),
+                                            ),
+                                            child: Text(
+                                              statusLabel,
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w700,
+                                                color: statusFg,
+                                                letterSpacing: -0.1,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    const Divider(height: 1, thickness: 1, color: hairline),
+                                    detailRow('발생일시', md.occurredAt),
+                                    const Divider(height: 1, thickness: 1, indent: 16, endIndent: 16, color: hairline),
+                                    detailRow('고장증상', md.symptom),
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                      child: Row(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          const SizedBox(
+                                            width: 76,
+                                            child: Text(
+                                              '운행여부',
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                height: 1.35,
+                                                color: labelColor,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ),
+                                          Expanded(
+                                            child: DecoratedBox(
+                                              decoration: BoxDecoration(
+                                                color: urgencyBg,
+                                                borderRadius: BorderRadius.circular(10),
+                                              ),
+                                              child: Padding(
+                                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                                child: Row(
+                                                  children: [
+                                                    Icon(urgencyIconData, size: 18, color: urgencyFg),
+                                                    const SizedBox(width: 8),
+                                                    Expanded(
+                                                      child: Text(
+                                                        md.driveability,
+                                                        style: TextStyle(
+                                                          fontSize: 14,
+                                                          fontWeight: FontWeight.w600,
+                                                          color: urgencyFg,
+                                                          height: 1.25,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    const Divider(height: 1, thickness: 1, indent: 16, endIndent: 16, color: hairline),
+                                    detailRow('연락처', md.phone),
+                                    if (md.specialNote.isNotEmpty) ...[
+                                      const Divider(height: 1, thickness: 1, indent: 16, endIndent: 16, color: hairline),
+                                      detailRow('특이사항', md.specialNote),
+                                    ],
+                                    if (md.photoUrls.isNotEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+                                        child: Wrap(
+                                          spacing: 8,
+                                          runSpacing: 8,
+                                          children: md.photoUrls.map((url) {
+                                            return GestureDetector(
+                                              onTap: () => widget.onOpenGallery(url),
+                                              child: ClipRRect(
+                                                borderRadius: BorderRadius.circular(10),
+                                                child: Image.network(
+                                                  url,
+                                                  width: 60,
+                                                  height: 60,
+                                                  fit: BoxFit.cover,
+                                                  errorBuilder: (_, __, ___) => Container(
+                                                    width: 60,
+                                                    height: 60,
+                                                    color: hairline,
+                                                    child: const Icon(Icons.broken_image_outlined, size: 22, color: Color(0xFFCBD5E1)),
+                                                  ),
+                                                ),
+                                              ),
+                                            );
+                                          }).toList(),
+                                        ),
+                                      ),
+                                    if (widget.onMaintenanceStatusChanged != null && !md.consumableOnly)
+                                      Padding(
+                                        padding: const EdgeInsets.fromLTRB(12, 2, 12, 12),
+                                        child: Row(
+                                          children: [
+                                            _maintenanceStatusBtn('정비예정', const Color(0xFF2563EB), md.status == '정비예정'),
+                                            const SizedBox(width: 8),
+                                            _maintenanceStatusBtn('정비완료', const Color(0xFF16A34A), md.status == '정비완료'),
+                                          ],
+                                        ),
+                                      )
+                                    else
+                                      const SizedBox(height: 14),
+                                  ],
+                          ),
+                        ),
                       ),
-                    ),
                     ),
                     if (!msg.isMe) ...[const SizedBox(width: 4), _timeText(stripSeconds: true)],
                   ],
@@ -1038,21 +1384,27 @@ class _MessageBubbleState extends State<MessageBubble> {
           final newStatus = active ? '접수' : label;
           widget.onMaintenanceStatusChanged?.call(msg, newStatus);
         },
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 8),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          padding: const EdgeInsets.symmetric(vertical: 10),
           decoration: BoxDecoration(
-            color: active ? color.withValues(alpha: 0.12) : Colors.white,
-            border: Border.all(color: active ? color : const Color(0xFFDDDDDD), width: 1.5),
-            borderRadius: BorderRadius.circular(10),
+            color: active ? color.withValues(alpha: 0.1) : Colors.transparent,
+            border: Border.all(
+              color: active ? color.withValues(alpha: 0.4) : const Color(0xFFE2E8F0),
+              width: 1,
+            ),
+            borderRadius: BorderRadius.circular(12),
           ),
           alignment: Alignment.center,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(active ? Icons.check_circle : Icons.circle_outlined, size: 16, color: active ? color : const Color(0xFFBBBBBB)),
-              const SizedBox(width: 4),
-              Text(label, style: TextStyle(fontSize: 12, fontWeight: active ? FontWeight.w700 : FontWeight.w400, color: active ? color : const Color(0xFF888888))),
-            ],
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+              color: active ? color : const Color(0xFF64748B),
+              letterSpacing: -0.2,
+            ),
           ),
         ),
       ),

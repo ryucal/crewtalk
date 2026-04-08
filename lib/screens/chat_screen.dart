@@ -15,6 +15,7 @@ import '../models/user_model.dart';
 import '../models/message_model.dart';
 import '../models/room_model.dart';
 import '../models/room_kakao_nav_link.dart';
+import '../models/global_timetable_visibility.dart';
 import '../providers/app_provider.dart';
 import '../providers/chat_streams_provider.dart';
 import '../database/database_provider.dart';
@@ -28,6 +29,7 @@ import '../providers/gps_provider.dart';
 import '../services/gps_service.dart';
 import '../utils/app_colors.dart';
 import '../utils/helpers.dart';
+import '../utils/kst_date.dart';
 import '../utils/kakao_kko_url_input_formatter.dart';
 import '../widgets/message_bubbles.dart';
 import '../widgets/timetable_image.dart';
@@ -66,6 +68,9 @@ String _roomListLastPreview(MessageModel msg) {
     case MessageType.maintenance:
       final md = msg.maintenanceData;
       if (md == null) return '🔧 정비 접수';
+      if (md.consumableOnly && md.consumableItems.isNotEmpty) {
+        return '🧴 ${md.consumableRequestDisplayLine}';
+      }
       return '🔧 ${md.car} · ${md.symptom}';
   }
 }
@@ -87,6 +92,21 @@ int _messageOrderMs(MessageModel m) {
   } catch (_) {
     return m.id;
   }
+}
+
+DateTime? _parseChatDateKey(String dateStr) {
+  final parts = dateStr.split(RegExp(r'[-/.]'));
+  if (parts.length != 3) return null;
+  final y = int.tryParse(parts[0].trim());
+  final mo = int.tryParse(parts[1].trim());
+  final da = int.tryParse(parts[2].trim());
+  if (y == null || mo == null || da == null) return null;
+  return DateTime(y, mo, da);
+}
+
+String _weekdayLabelKo(DateTime d) {
+  const w = ['월', '화', '수', '목', '금', '토', '일'];
+  return w[d.weekday - 1];
 }
 
 /// [lastReadMs] 보다 뒤에 온 첫 메시지 인덱스 (없으면 null)
@@ -158,6 +178,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _focusNode = FocusNode();
 
   bool _showSideMenu = false;
+  /// 정비방 사이드 메뉴 소모품 집계 — 선택 날짜(로컬 달력 기준, 당일 기본)
+  DateTime _consumableSideMenuPickDate = DateTime(
+    DateTime.now().year,
+    DateTime.now().month,
+    DateTime.now().day,
+  );
   bool _showEmergencyConfirm = false;
   DateTime? _lastEmergencySentAt; // 긴급 알림 쿨다운 (5분)
   static const _emergencyCooldown = Duration(minutes: 5);
@@ -239,6 +265,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           myFirebaseUid: uid,
           lastPreview: '',
         );
+        await db.dequeueOutboxMessage(item.id);
+      } on FormatException {
         await db.dequeueOutboxMessage(item.id);
       } catch (e) {
         if (kDebugMode) debugPrint('outbox flush 실패 (row ${item.id}): $e');
@@ -349,6 +377,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     setState(() {
       _showSideMenu = true;
       _kakaoNavPanelExpanded = false;
+      if (freshRoom.isMaintenanceRoom) {
+        final n = DateTime.now();
+        _consumableSideMenuPickDate = DateTime(n.year, n.month, n.day);
+      }
     });
   }
 
@@ -801,6 +833,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       }
       final docId = found?.firestoreDocId;
       if (docId != null) {
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        ref.read(chatMessagesProvider(room.id).notifier)
+            .updateMessageLocally(docId, (m) => m.copyWith(text: newText, editedAtMs: nowMs));
         unawaited(
           ChatFirestoreRepository.updateMessageText(
             roomDocId: room.id.toString(),
@@ -830,6 +865,20 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     if (!AuthRepository.firebaseAvailable) return;
     final docId = msg.firestoreDocId;
     if (docId == null) return;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    ref.read(chatMessagesProvider(room.id).notifier)
+        .updateMessageLocally(docId, (m) => m.copyWith(
+          car: car,
+          route: route,
+          subRoute: subRoute,
+          reportData: ReportData(
+            type: reportType,
+            count: count,
+            maxCount: maxCount,
+            isOverCapacity: count >= maxCount,
+          ),
+          editedAtMs: nowMs,
+        ));
     unawaited(
       ChatFirestoreRepository.updateReportData(
         roomDocId: room.id.toString(),
@@ -861,10 +910,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       }
       final docId = found?.firestoreDocId;
       if (docId != null) {
+        ref.read(chatMessagesProvider(room.id).notifier)
+            .updateMessageLocally(docId, (m) => m.copyWith(isDeleted: true));
         unawaited(
-          ChatFirestoreRepository.deleteMessage(room.id.toString(), docId)
+          ChatFirestoreRepository.softDeleteMessage(room.id.toString(), docId)
               .catchError((Object e, StackTrace st) {
-                if (kDebugMode) debugPrint('deleteMessage: $e\n$st');
+                if (kDebugMode) debugPrint('softDeleteMessage: $e\n$st');
               }),
         );
       }
@@ -1359,7 +1410,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           children: [
             Column(
               children: [
-                _buildHeader(room, isAdmin, isAdminRoom, isDbRoom, isVendorRoom, isMaintenanceRoom),
+                _buildHeader(
+                  room,
+                  isAdmin,
+                  isAdminRoom,
+                  isDbRoom,
+                  isVendorRoom,
+                  isMaintenanceRoom,
+                  ref.watch(globalTimetableVisibilityProvider),
+                  kstDateKeyNow(),
+                ),
                 if (isAdminRoom)
                   Expanded(child: _buildWorkHubBody(room, messages, user))
                 else ...[
@@ -1371,7 +1431,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                         room,
                         messages,
                         user,
-                        user.canModerateChatMessages,
+                        user.isSuperAdmin,
                         extraBottomPadding: !isDbRoom && _showReportPanel,
                       ),
                     ),
@@ -1400,7 +1460,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   // ─── 헤더 ───────────────────────────────────────────────────
-  Widget _buildHeader(RoomModel room, bool isAdmin, bool isAdminRoom, bool isDbRoom, bool isVendorRoom, bool isMaintenanceRoom) {
+  Widget _buildHeader(
+    RoomModel room,
+    bool isAdmin,
+    bool isAdminRoom,
+    bool isDbRoom,
+    bool isVendorRoom,
+    bool isMaintenanceRoom,
+    GlobalTimetableByDate timetableByDate,
+    String kstTodayKey,
+  ) {
     return Container(
       padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top + 6, bottom: 6, left: 4, right: 8),
       decoration: const BoxDecoration(
@@ -1417,9 +1486,23 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           Expanded(
             child: Text(room.name, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, letterSpacing: -0.5)),
           ),
-          if (!isAdminRoom && !isDbRoom && room.hasTimetable1)
+          if (!isAdminRoom &&
+              !isDbRoom &&
+              globalTimetableHeaderSlotVisible(
+                byDate: timetableByDate,
+                kstTodayKey: kstTodayKey,
+                slot: 1,
+                roomHasTimetableImages: room.hasTimetable1,
+              ))
             _buildTimetableHeaderButton(slot: 1, label: '배차표1'),
-          if (!isAdminRoom && !isDbRoom && room.hasTimetable2)
+          if (!isAdminRoom &&
+              !isDbRoom &&
+              globalTimetableHeaderSlotVisible(
+                byDate: timetableByDate,
+                kstTodayKey: kstTodayKey,
+                slot: 2,
+                roomHasTimetableImages: room.hasTimetable2,
+              ))
             _buildTimetableHeaderButton(slot: 2, label: '배차표2'),
           if (!isAdminRoom && !isDbRoom)
             Padding(
@@ -2207,6 +2290,216 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
   }
 
+  bool _messageOnConsumablePickDate(MessageModel m, DateTime pick) {
+    final d = _parseChatDateKey(m.date);
+    if (d == null) return false;
+    return d.year == pick.year && d.month == pick.month && d.day == pick.day;
+  }
+
+  Future<void> _pickConsumableSideMenuDate(BuildContext context) async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _consumableSideMenuPickDate,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      helpText: '소모품 요청 내역 날짜',
+    );
+    if (picked != null && mounted) {
+      setState(() {
+        _consumableSideMenuPickDate = DateTime(picked.year, picked.month, picked.day);
+      });
+    }
+  }
+
+  /// 정비방 사이드 메뉴 — 달력으로 날짜 선택, 선택일 소모품 요청만 표시 (채팅에 로드된 메시지 기준)
+  List<Widget> _buildMaintenanceConsumableSideSection(BuildContext context, List<MessageModel> messages) {
+    final pick = _consumableSideMenuPickDate;
+    final consumableMsgs = messages.where((m) {
+      if (m.isDeleted) return false;
+      if (m.type != MessageType.maintenance) return false;
+      final md = m.maintenanceData;
+      return md != null && md.consumableOnly && md.consumableItems.isNotEmpty;
+    }).toList();
+
+    final dayList = consumableMsgs.where((m) => _messageOnConsumablePickDate(m, pick)).toList()
+      ..sort((a, b) => _messageOrderMs(b).compareTo(_messageOrderMs(a)));
+
+    const sectionDeco = BoxDecoration(
+      color: Color(0xFFF0F7FF),
+      borderRadius: BorderRadius.all(Radius.circular(12)),
+      border: Border.fromBorderSide(BorderSide(color: Color(0xFFBFDBFE), width: 1.2)),
+    );
+
+    final wd = _weekdayLabelKo(pick);
+    final dateTitle =
+        '${pick.year}-${pick.month.toString().padLeft(2, '0')}-${pick.day.toString().padLeft(2, '0')} ($wd)';
+    final today = DateTime.now();
+    final isToday = pick.year == today.year && pick.month == today.month && pick.day == today.day;
+
+    var urea = 0, coolant = 0, washer = 0;
+    for (final m in dayList) {
+      for (final c in m.maintenanceData!.consumableItems) {
+        switch (c) {
+          case 'urea':
+            urea++;
+            break;
+          case 'coolant':
+            coolant++;
+            break;
+          case 'washer':
+            washer++;
+            break;
+        }
+      }
+    }
+    final countParts = <String>[];
+    if (urea > 0) countParts.add('요소수 $urea');
+    if (coolant > 0) countParts.add('부동액 $coolant');
+    if (washer > 0) countParts.add('워셔액 $washer');
+    final countLine = countParts.join(' · ');
+
+    final detailBlock = dayList.isEmpty
+        ? Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            child: Text(
+              '선택한 날짜에 소모품 요청이 없어요.',
+              style: TextStyle(fontSize: 13, color: Colors.grey.shade700, height: 1.35),
+            ),
+          )
+        : Container(
+            width: double.infinity,
+            margin: const EdgeInsets.only(top: 4),
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0xFFE2E8F0)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (countLine.isNotEmpty) ...[
+                  Text(
+                    countLine,
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.grey.shade800, height: 1.3),
+                  ),
+                  const SizedBox(height: 8),
+                  const Divider(height: 1, color: Color(0xFFF1F5F9)),
+                  const SizedBox(height: 6),
+                ],
+                ...dayList.map((m) {
+                  final line = m.maintenanceData?.consumableRequestDisplayLine ?? '';
+                  final tt = _roomListTime(m.time);
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          width: 44,
+                          child: Text(
+                            tt,
+                            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.grey.shade600),
+                          ),
+                        ),
+                        Expanded(
+                          child: Text(
+                            line,
+                            style: const TextStyle(fontSize: 12, height: 1.35, color: Color(0xFF334155)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+              ],
+            ),
+          );
+
+    return [
+      Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(14),
+        decoration: sectionDeco,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.inventory_2_outlined, size: 20, color: Colors.blue.shade800),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '소모품 요청',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: Colors.blue.shade900),
+                  ),
+                ),
+                Text(
+                  '${dayList.length}건',
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Color(0xFF1D4ED8)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () => _pickConsumableSideMenuDate(context),
+                borderRadius: BorderRadius.circular(10),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: const Color(0xFF93C5FD)),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.calendar_month_rounded, size: 22, color: Colors.blue.shade800),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              dateTitle,
+                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: Color(0xFF0F172A)),
+                            ),
+                            Text(
+                              '탭하여 날짜 선택',
+                              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (isToday)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFDCFCE7),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Text(
+                            '오늘',
+                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Color(0xFF15803D)),
+                          ),
+                        ),
+                      const SizedBox(width: 4),
+                      Icon(Icons.chevron_right_rounded, color: Colors.grey.shade500),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            detailBlock,
+          ],
+        ),
+      ),
+      const SizedBox(height: 18),
+    ];
+  }
+
   // ─── 사이드 메뉴 ─────────────────────────────────────────────
   Widget _buildSideMenu(RoomModel room, List<MessageModel> messages, UserModel user, bool isAdminRoom, bool isDbRoom, bool isVendorRoom, bool isMaintenanceRoom) {
     return SizedBox.expand(
@@ -2239,7 +2532,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          if (!isAdminRoom && !isDbRoom) ...[
+                          if (isMaintenanceRoom) ..._buildMaintenanceConsumableSideSection(context, messages),
+                          if (!isAdminRoom && !isDbRoom && !isMaintenanceRoom) ...[
                             // ─── 카카오맵 내비 ───────────────────────────
                             const SizedBox(height: 8),
                             const Text('카카오맵 내비', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF333333))),
@@ -3502,8 +3796,14 @@ class _MaintenanceReportPanelState extends ConsumerState<_MaintenanceReportPanel
   late String _timeStr;
   List<String> _pickedPhotoPaths = [];
   bool _uploading = false;
+  final Set<String> _consumableCodes = {};
 
   static const _driveOptions = ['정상 운행 가능', '조심 운행 가능', '즉시 점검 필요'];
+  static const _consumableOptions = <(String code, String label)>[
+    ('urea', '요소수'),
+    ('coolant', '부동액'),
+    ('washer', '워셔액'),
+  ];
 
   static const _labelStyle = TextStyle(fontSize: 13, color: Color(0xFF999999), fontWeight: FontWeight.w700);
   static const _fieldDeco = BoxDecoration(
@@ -3539,6 +3839,53 @@ class _MaintenanceReportPanelState extends ConsumerState<_MaintenanceReportPanel
   Future<void> _send() async {
     final user = ref.read(userProvider);
     if (user == null) return;
+
+    final t = timeNow();
+    final today = dateToday();
+
+    if (_consumableCodes.isNotEmpty) {
+      final sortedItems = MaintenanceData.consumableItemCodesOrdered
+          .where(_consumableCodes.contains)
+          .toList();
+      if (sortedItems.isEmpty) return;
+
+      final msg = MessageModel(
+        id: DateTime.now().millisecondsSinceEpoch,
+        userId: outgoingMessageUserId(user),
+        name: user.name,
+        phone: user.phone,
+        company: user.company,
+        car: user.car,
+        time: t,
+        date: today,
+        type: MessageType.maintenance,
+        isMe: true,
+        maintenanceData: MaintenanceData(
+          car: user.car,
+          driverName: user.name,
+          phone: user.phone,
+          occurredAt: '$_dateStr $_timeStr',
+          symptom: '',
+          driveability: '소모품 요청',
+          photoUrls: const [],
+          consumableOnly: true,
+          consumableItems: sortedItems,
+        ),
+      );
+      widget.onSend(msg);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('소모품 요청을 보냈습니다.')),
+        );
+      }
+      setState(() {
+        _consumableCodes.clear();
+        _pickedPhotoPaths = [];
+      });
+      return;
+    }
+
     if (_symptomCtl.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('고장 증상을 입력해 주세요.')),
@@ -3568,8 +3915,6 @@ class _MaintenanceReportPanelState extends ConsumerState<_MaintenanceReportPanel
     if (!mounted) return;
     setState(() => _uploading = false);
 
-    final t = timeNow();
-    final today = dateToday();
     final msg = MessageModel(
       id: DateTime.now().millisecondsSinceEpoch,
       userId: outgoingMessageUserId(user),
@@ -3610,6 +3955,9 @@ class _MaintenanceReportPanelState extends ConsumerState<_MaintenanceReportPanel
   @override
   Widget build(BuildContext context) {
     final user = ref.watch(userProvider);
+    final consumableMode = _consumableCodes.isNotEmpty;
+    final canSelectConsumable =
+        _symptomCtl.text.trim().isEmpty && _driveability.isEmpty;
     return Container(
       constraints: const BoxConstraints(maxHeight: 480),
       child: SingleChildScrollView(
@@ -3695,8 +4043,13 @@ class _MaintenanceReportPanelState extends ConsumerState<_MaintenanceReportPanel
               decoration: _fieldDeco,
               child: TextField(
                 controller: _symptomCtl,
+                enabled: !consumableMode,
+                onChanged: (_) => setState(() {}),
                 maxLines: 2,
-                style: const TextStyle(fontSize: 16),
+                style: TextStyle(
+                  fontSize: 16,
+                  color: consumableMode ? const Color(0xFFBBBBBB) : Colors.black,
+                ),
                 decoration: const InputDecoration(
                   border: InputBorder.none,
                   hintText: '증상을 상세히 입력해 주세요',
@@ -3724,19 +4077,81 @@ class _MaintenanceReportPanelState extends ConsumerState<_MaintenanceReportPanel
                   color = const Color(0xFFC62828);
                 }
                 return GestureDetector(
-                  onTap: () => setState(() => _driveability = active ? '' : opt),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: active ? color.withValues(alpha: 0.1) : Colors.white,
-                      border: Border.all(color: active ? color : const Color(0xFFDDDDDD), width: 1.5),
-                      borderRadius: BorderRadius.circular(10),
+                  onTap: consumableMode
+                      ? null
+                      : () => setState(() {
+                            _driveability = active ? '' : opt;
+                            if (_driveability.isNotEmpty) _consumableCodes.clear();
+                          }),
+                  child: Opacity(
+                    opacity: consumableMode ? 0.45 : 1,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: active ? color.withValues(alpha: 0.1) : Colors.white,
+                        border: Border.all(color: active ? color : const Color(0xFFDDDDDD), width: 1.5),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(opt, style: TextStyle(fontSize: 14, fontWeight: active ? FontWeight.w700 : FontWeight.w400, color: active ? color : const Color(0xFF888888))),
                     ),
-                    child: Text(opt, style: TextStyle(fontSize: 14, fontWeight: active ? FontWeight.w700 : FontWeight.w400, color: active ? color : const Color(0xFF888888))),
                   ),
                 );
               }).toList(),
             ),
+            const SizedBox(height: 14),
+            const Text('소모품 (중복 선택)', style: _labelStyle),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: _consumableOptions.map((e) {
+                final code = e.$1;
+                final label = e.$2;
+                final active = _consumableCodes.contains(code);
+                const color = Color(0xFF1565C0);
+                return GestureDetector(
+                  onTap: canSelectConsumable
+                      ? () => setState(() {
+                            if (active) {
+                              _consumableCodes.remove(code);
+                            } else {
+                              _consumableCodes.add(code);
+                              _driveability = '';
+                              _symptomCtl.clear();
+                              _pickedPhotoPaths = [];
+                            }
+                          })
+                      : null,
+                  child: Opacity(
+                    opacity: canSelectConsumable ? 1 : 0.45,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: active ? color.withValues(alpha: 0.1) : Colors.white,
+                        border: Border.all(color: active ? color : const Color(0xFFDDDDDD), width: 1.5),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        label,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: active ? FontWeight.w700 : FontWeight.w400,
+                          color: active ? color : const Color(0xFF888888),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+            if (consumableMode)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  '소모품을 선택한 경우 고장 증상·운행 여부·사진은 보내지 않습니다.',
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade700, height: 1.35),
+                ),
+              ),
             const SizedBox(height: 14),
             // 사진 첨부
             const Text('사진 첨부', style: _labelStyle),
@@ -3744,20 +4159,23 @@ class _MaintenanceReportPanelState extends ConsumerState<_MaintenanceReportPanel
             Row(
               children: [
                 GestureDetector(
-                  onTap: _uploading ? null : _pickPhotos,
-                  child: Container(
-                    width: 60, height: 60,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF5F5F5),
-                      border: Border.all(color: const Color(0xFFDDDDDD)),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(Icons.camera_alt_outlined, size: 22, color: Color(0xFF888888)),
-                        Text('${_pickedPhotoPaths.length}', style: const TextStyle(fontSize: 13, color: Color(0xFF888888))),
-                      ],
+                  onTap: (_uploading || consumableMode) ? null : _pickPhotos,
+                  child: Opacity(
+                    opacity: consumableMode ? 0.45 : 1,
+                    child: Container(
+                      width: 60, height: 60,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF5F5F5),
+                        border: Border.all(color: const Color(0xFFDDDDDD)),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(Icons.camera_alt_outlined, size: 22, color: Color(0xFF888888)),
+                          Text('${_pickedPhotoPaths.length}', style: const TextStyle(fontSize: 13, color: Color(0xFF888888))),
+                        ],
+                      ),
                     ),
                   ),
                 ),

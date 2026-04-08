@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+version: 1.0.0+100
 
 environment:
   sdk: ^3.9.2
@@ -51,6 +51,7 @@ dependencies:
   cloud_functions: ^6.1.0
   firebase_storage: ^13.2.0
   firebase_messaging: ^16.0.0
+  firebase_crashlytics: ^5.1.0
   flutter_local_notifications: ^19.0.0
   permission_handler: ^12.0.0
   audioplayers: ^6.1.0
@@ -67,6 +68,7 @@ dev_dependencies:
   riverpod_generator: ^2.6.2
   drift_dev: ^2.24.0
   flutter_launcher_icons: ^0.14.3
+  flutter_native_splash: ^2.4.4
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -119,3 +121,13 @@ flutter_launcher_icons:
   ios: true
   image_path: assets/icons/app_icon.png
   remove_alpha_ios: true
+
+# 네이티브 스플래시: 전체 배경 브랜드 컬러 + 중앙 로고 (scaleAspectFit으로 화면에 맞게 확대)
+flutter_native_splash:
+  color: "#4740d4"
+  image: assets/icons/app_icon.png
+  android_gravity: center
+  ios_content_mode: scaleAspectFit
+  android_12:
+    color: "#4740d4"
+    image: assets/icons/app_icon.png

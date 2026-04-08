@@ -17,7 +17,8 @@ String dateToday() {
 }
 
 String formatDateLabel(String dateStr) {
-  final d = DateTime.parse(dateStr);
+  final d = DateTime.tryParse(dateStr);
+  if (d == null) return dateStr;
   final days = ['일', '월', '화', '수', '목', '금', '토'];
   return '${d.year}년 ${d.month}월 ${d.day}일 ${days[d.weekday % 7]}요일';
 }

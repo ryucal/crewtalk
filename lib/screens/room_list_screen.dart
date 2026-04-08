@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,15 +12,18 @@ import '../models/room_model.dart';
 import '../models/company_model.dart';
 import '../models/emergency_contact.dart';
 import '../models/message_model.dart';
+import '../models/global_timetable_visibility.dart';
 import '../providers/app_provider.dart';
 import '../providers/company_directory_provider.dart';
 import '../providers/gps_provider.dart';
 import '../services/auth_repository.dart';
 import '../services/chat_firestore_repository.dart';
+import '../services/fcm_push_service.dart';
 import '../services/user_session_storage.dart';
 import '../services/gps_service.dart';
 import '../utils/app_colors.dart';
 import '../utils/helpers.dart';
+import '../utils/kst_date.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/timetable_image.dart';
 
@@ -38,6 +43,7 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
   bool _showAddPopup = false;
   bool _showCompanyMgmt = false;
   bool _showBroadcastPopup = false;
+  bool _showTimetableVisibilitySheet = false;
   bool _showSettings = false;
   bool _showEmergencyContacts = false;
   bool _settingNotifSound = true;
@@ -319,6 +325,7 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
         _showBroadcastPopup ||
         _showAddPopup ||
         _showCompanyMgmt ||
+        _showTimetableVisibilitySheet ||
         _pinPopup != null ||
         _editRoomPopup != null;
 
@@ -333,6 +340,7 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
             _showBroadcastPopup = false;
             _showAddPopup = false;
             _showCompanyMgmt = false;
+            _showTimetableVisibilitySheet = false;
             _pinPopup = null;
             _editRoomPopup = null;
           });
@@ -365,6 +373,8 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
 
           // 소속 관리 팝업
           if (_showCompanyMgmt) _buildCompanyMgmtPopup(companies),
+
+          if (_showTimetableVisibilitySheet) _buildTimetableVisibilityPopup(),
 
           // 길게 누르기 팝업 (고정/수정)
           if (_pinPopup != null) _buildPinPopup(user),
@@ -743,11 +753,35 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
               onTap: () => setState(() { _showActionSheet = false; _editMode = true; }),
             ),
           ],
+          if (u.canWriteRoomMetaOnFirestore)
+            _ActionSheetRow(
+              icon: Icons.calendar_month_outlined,
+              iconBackground: const Color(0xFFEFF6FF),
+              iconColor: const Color(0xFF2563EB),
+              title: '배차표 노출 예약',
+              subtitle: '전체 채팅방 · 날짜별 배차표1·2 버튼',
+              onTap: () => setState(() {
+                _showActionSheet = false;
+                _showTimetableVisibilitySheet = true;
+              }),
+            ),
           Padding(
             padding: EdgeInsets.fromLTRB(12, 8, 12, 12 + bottomInset),
             child: _SheetDismissBtn(label: '닫기', onTap: () => setState(() => _showActionSheet = false)),
           ),
         ],
+      ),
+    );
+  }
+
+  // ─── 전역 배차표 노출 (config/timetable_visibility) ───────────
+  Widget _buildTimetableVisibilityPopup() {
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    return _BottomSheet(
+      onDismiss: () => setState(() => _showTimetableVisibilitySheet = false),
+      child: _TimetableVisibilitySheetContent(
+        bottomInset: bottomInset,
+        onClose: () => setState(() => _showTimetableVisibilitySheet = false),
       ),
     );
   }
@@ -2386,6 +2420,8 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
                       onChanged: (v) async {
                         setState(() => _settingNotifSound = v);
                         await UserSessionStorage.setMessageNotifSoundEnabled(v);
+                        final uid = ref.read(userProvider)?.firebaseUid;
+                        await FcmPushService.syncMessageNotificationPrefsToFirestore(uid);
                       },
                       showDivider: true,
                     ),
@@ -2397,6 +2433,8 @@ class _RoomListScreenState extends ConsumerState<RoomListScreen> {
                       onChanged: (v) async {
                         setState(() => _settingVibration = v);
                         await UserSessionStorage.setMessageNotifVibrateEnabled(v);
+                        final uid = ref.read(userProvider)?.firebaseUid;
+                        await FcmPushService.syncMessageNotificationPrefsToFirestore(uid);
                       },
                       showDivider: true,
                     ),
@@ -2911,9 +2949,24 @@ class _RoomItemState extends State<_RoomItem> {
                         width: 48, height: 48,
                         decoration: BoxDecoration(color: const Color(0xFFE8EAF6), borderRadius: BorderRadius.circular(14)),
                         alignment: Alignment.center,
-                        child: Text(room.id == 999 ? '📊' : '🗂', style: const TextStyle(fontSize: 24)),
+                        child: switch (room.id) {
+                          999 => const Icon(Icons.calendar_month_outlined, size: 26, color: Color(0xFF5C6BC0)),
+                          998 => const Icon(Icons.search_rounded, size: 26, color: Color(0xFF5C6BC0)),
+                          _ => const Icon(Icons.admin_panel_settings_outlined, size: 24, color: Color(0xFF5C6BC0)),
+                        },
                       )
-                    : AvatarWidget(name: room.name),
+                    : (room.isMaintenanceRoom || room.id == 13)
+                        ? Container(
+                            width: 48,
+                            height: 48,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFF3E0),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            alignment: Alignment.center,
+                            child: const Icon(Icons.build_rounded, size: 26, color: Color(0xFFE65100)),
+                          )
+                        : AvatarWidget(name: room.name),
                 if (widget.showPinnedBadge)
                   const Positioned(
                     top: -4, right: -4,
@@ -3033,6 +3086,314 @@ class _IconBtn extends StatelessWidget {
       child: Text(label, style: const TextStyle(fontSize: 16)),
     ),
   );
+}
+
+/// 방 목록 + 메뉴 — `config/timetable_visibility` 편집
+class _TimetableVisibilitySheetContent extends ConsumerStatefulWidget {
+  final double bottomInset;
+  final VoidCallback onClose;
+
+  const _TimetableVisibilitySheetContent({
+    required this.bottomInset,
+    required this.onClose,
+  });
+
+  @override
+  ConsumerState<_TimetableVisibilitySheetContent> createState() =>
+      _TimetableVisibilitySheetContentState();
+}
+
+class _TimetableVisibilitySheetContentState extends ConsumerState<_TimetableVisibilitySheetContent> {
+  late DateTime _selectedDate;
+  late bool _slot1;
+  late bool _slot2;
+  bool _saving = false;
+
+  String get _dateKey =>
+      kstDateKeyFromYmd(_selectedDate.year, _selectedDate.month, _selectedDate.day);
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedDate = kstTodayDateOnly();
+    _applyRule(ref.read(globalTimetableVisibilityProvider));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final today = kstDateKeyNow();
+      unawaited(ChatFirestoreRepository.prunePastGlobalTimetableDays(today));
+    });
+  }
+
+  void _applyRule(GlobalTimetableByDate m) {
+    final r = m[_dateKey];
+    _slot1 = r?.slot1Visible ?? true;
+    _slot2 = r?.slot2Visible ?? true;
+  }
+
+  Future<void> _pickDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _selectedDate,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2040),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _selectedDate = DateTime(picked.year, picked.month, picked.day);
+      _applyRule(ref.read(globalTimetableVisibilityProvider));
+    });
+  }
+
+  Future<void> _save() async {
+    if (!AuthRepository.firebaseAvailable) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Firebase를 사용할 수 없습니다')),
+      );
+      return;
+    }
+    setState(() => _saving = true);
+    try {
+      await ChatFirestoreRepository.setGlobalTimetableDay(
+        _dateKey,
+        slot1Visible: _slot1,
+        slot2Visible: _slot2,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$_dateKey 저장했습니다')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('저장에 실패했습니다')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _deleteDay(String dateKey) async {
+    if (!AuthRepository.firebaseAvailable) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Firebase를 사용할 수 없습니다')),
+        );
+      }
+      return;
+    }
+    try {
+      await ChatFirestoreRepository.removeGlobalTimetableDay(dateKey);
+      if (!mounted) return;
+      if (dateKey == _dateKey) {
+        setState(() => _applyRule(ref.read(globalTimetableVisibilityProvider)));
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$dateKey 규칙을 삭제했습니다')),
+      );
+    } catch (e, st) {
+      if (kDebugMode) debugPrint('배차표 규칙 삭제 실패: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('삭제에 실패했습니다. 권한·네트워크를 확인해 주세요.')),
+        );
+      }
+    }
+  }
+
+  Widget _handle() {
+    return Padding(
+      padding: const EdgeInsets.only(top: 12, bottom: 4),
+      child: Center(
+        child: Container(
+          width: 44,
+          height: 5,
+          decoration: BoxDecoration(
+            color: const Color(0xFFCBD5E1),
+            borderRadius: BorderRadius.circular(100),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final byDate = ref.watch(globalTimetableVisibilityProvider);
+    final todayKey = kstDateKeyNow();
+    final keys = byDate.keys.where((k) => k.compareTo(todayKey) >= 0).toList()..sort();
+
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+        _handle(),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 4, 0),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEFF6FF),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0xFFBFDBFE).withValues(alpha: 0.8)),
+                ),
+                alignment: Alignment.center,
+                child: const Icon(Icons.calendar_month_outlined, size: 24, color: Color(0xFF2563EB)),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '배차표 노출 예약',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -0.45,
+                        height: 1.2,
+                        color: Color(0xFF0F172A),
+                      ),
+                    ),
+                    SizedBox(height: 5),
+                    Text(
+                      '한국 날짜(KST) 기준 · 전체 채팅방 공통',
+                      style: TextStyle(fontSize: 12.5, height: 1.35, color: Color(0xFF64748B)),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                onPressed: widget.onClose,
+                icon: const Icon(Icons.close_rounded),
+                tooltip: '닫기',
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 20, thickness: 1, color: Color(0xFFF1F5F9)),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Material(
+            color: const Color(0xFFF8FAFC),
+            borderRadius: BorderRadius.circular(14),
+            child: InkWell(
+              onTap: _saving ? null : _pickDate,
+              borderRadius: BorderRadius.circular(14),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                child: Row(
+                  children: [
+                    const Icon(Icons.edit_calendar_outlined, size: 22, color: Color(0xFF475569)),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        '날짜 $_dateKey',
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF0F172A),
+                        ),
+                      ),
+                    ),
+                    const Icon(Icons.chevron_right_rounded, color: Color(0xFFCBD5E1)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+        SwitchListTile(
+          contentPadding: const EdgeInsets.fromLTRB(20, 0, 12, 0),
+          title: const Text('배차표1 버튼', style: TextStyle(fontWeight: FontWeight.w600)),
+          value: _slot1,
+          onChanged: _saving ? null : (v) => setState(() => _slot1 = v),
+        ),
+        SwitchListTile(
+          contentPadding: const EdgeInsets.fromLTRB(20, 0, 12, 0),
+          title: const Text('배차표2 버튼', style: TextStyle(fontWeight: FontWeight.w600)),
+          value: _slot2,
+          onChanged: _saving ? null : (v) => setState(() => _slot2 = v),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+          child: SizedBox(
+            width: double.infinity,
+            child: _BlackBtn(
+              label: _saving ? '저장 중…' : '이 날짜로 저장',
+              enabled: !_saving,
+              onTap: _saving ? () {} : _save,
+            ),
+          ),
+        ),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(20, 12, 20, 6),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              '등록된 날짜',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFF64748B)),
+            ),
+          ),
+        ),
+        if (keys.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+            child: Text(
+              '예약이 없으면 이미지가 있는 방은 기존처럼 항상 표시됩니다.',
+              style: TextStyle(fontSize: 13, height: 1.4, color: Color(0xFF94A3B8)),
+            ),
+          )
+        else
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (var i = 0; i < keys.length; i++) ...[
+                  if (i > 0) const Divider(height: 1, color: Color(0xFFF1F5F9)),
+                  ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    title: Text(keys[i], style: const TextStyle(fontWeight: FontWeight.w700)),
+                    subtitle: Text(
+                      '1: ${byDate[keys[i]]!.slot1Visible ? "표시" : "숨김"} · 2: ${byDate[keys[i]]!.slot2Visible ? "표시" : "숨김"}',
+                      style: const TextStyle(fontSize: 12.5, color: Color(0xFF64748B)),
+                    ),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline_rounded, color: Color(0xFF94A3B8)),
+                      onPressed: () {
+                        final dk = keys[i];
+                        unawaited(_deleteDay(dk));
+                      },
+                      tooltip: '이 날짜 규칙 삭제',
+                    ),
+                    onTap: () {
+                      final k = keys[i];
+                      final parts = k.split('-');
+                      if (parts.length != 3) return;
+                      final y = int.tryParse(parts[0]);
+                      final mo = int.tryParse(parts[1]);
+                      final d = int.tryParse(parts[2]);
+                      if (y == null || mo == null || d == null) return;
+                      setState(() {
+                        _selectedDate = DateTime(y, mo, d);
+                        _applyRule(byDate);
+                      });
+                    },
+                  ),
+                ],
+              ],
+            ),
+          ),
+        SizedBox(height: 12 + widget.bottomInset),
+      ],
+      ),
+    );
+  }
 }
 
 class _BottomSheet extends StatelessWidget {

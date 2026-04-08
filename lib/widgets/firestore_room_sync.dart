@@ -9,6 +9,7 @@ import '../database/message_dao.dart';
 import '../database/room_dao.dart';
 import '../models/room_model.dart';
 import '../models/room_kakao_nav_link.dart';
+import '../models/global_timetable_visibility.dart';
 import '../models/user_model.dart';
 import '../providers/app_provider.dart';
 import '../services/auth_repository.dart';
@@ -30,6 +31,7 @@ class FirestoreRoomSync extends ConsumerStatefulWidget {
 class _FirestoreRoomSyncState extends ConsumerState<FirestoreRoomSync> {
   StreamSubscription<List<RoomModel>>? _roomsSub;
   StreamSubscription<Map<int, List<RoomKakaoNavLink>>>? _kakaoNavSub;
+  StreamSubscription<GlobalTimetableByDate>? _timetableVisSub;
   final _msgSubs = <int, StreamSubscription<Map<String, dynamic>?>>{};
   /// 앱 시작 후 방별 초기 미읽음 수를 1회 Firestore 조회한 방 ID 집합
   final _initialCountLoaded = <int>{};
@@ -41,10 +43,15 @@ class _FirestoreRoomSyncState extends ConsumerState<FirestoreRoomSync> {
     _roomsSub = null;
     _kakaoNavSub?.cancel();
     _kakaoNavSub = null;
+    _timetableVisSub?.cancel();
+    _timetableVisSub = null;
     _cancelMsgSubs();
     if (user == null || !AuthRepository.firebaseAvailable) {
       Future(() {
-        if (mounted) ref.read(roomProvider.notifier).mergeFromFirestore([]);
+        if (mounted) {
+          ref.read(roomProvider.notifier).mergeFromFirestore([]);
+          ref.read(globalTimetableVisibilityProvider.notifier).clear();
+        }
       });
       return;
     }
@@ -103,6 +110,18 @@ class _FirestoreRoomSyncState extends ConsumerState<FirestoreRoomSync> {
         if (kDebugMode) debugPrint('FirestoreRoomSync watchKakaoNavLinks error: $e\n$st');
       },
     );
+
+    _timetableVisSub = ChatFirestoreRepository.watchGlobalTimetableVisibility().listen(
+      (byDate) {
+        Future(() {
+          if (!mounted) return;
+          ref.read(globalTimetableVisibilityProvider.notifier).replace(byDate);
+        });
+      },
+      onError: (e, st) {
+        if (kDebugMode) debugPrint('FirestoreRoomSync watchGlobalTimetableVisibility error: $e\n$st');
+      },
+    );
   }
 
   /// 각 방의 최신 메시지 1건을 실시간 구독해 lastMsg·time·unread를 갱신합니다.
@@ -150,9 +169,14 @@ class _FirestoreRoomSyncState extends ConsumerState<FirestoreRoomSync> {
               preview = '🚨 긴급';
             case 'maintenance':
               final md = data['maintenanceData'] as Map<String, dynamic>?;
-              final mCar = md?['car'] as String? ?? '';
-              final mSym = md?['symptom'] as String? ?? '';
-              preview = '🔧 $mCar · $mSym';
+              if (md?['consumableOnly'] == true) {
+                final name = data['name'] as String? ?? '';
+                preview = name.isEmpty ? '🧴 소모품 요청' : '🧴 $name · 소모품 요청';
+              } else {
+                final mCar = md?['car'] as String? ?? '';
+                final mSym = md?['symptom'] as String? ?? '';
+                preview = '🔧 $mCar · $mSym';
+              }
             default:
               preview = text;
           }
@@ -269,6 +293,7 @@ class _FirestoreRoomSyncState extends ConsumerState<FirestoreRoomSync> {
   void dispose() {
     _roomsSub?.cancel();
     _kakaoNavSub?.cancel();
+    _timetableVisSub?.cancel();
     _cancelMsgSubs();
     super.dispose();
   }

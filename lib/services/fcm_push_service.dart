@@ -38,6 +38,36 @@ class FcmPushService {
     '채팅 알림',
     description: '새 메시지 및 안내',
     importance: Importance.defaultImportance,
+    playSound: true,
+    enableVibration: true,
+  );
+
+  /// FCM 백그라운드용 — 서버 `channelId`와 이름·동작이 일치해야 함 (`functions/index.js`)
+  static const _androidChannelNoVib = AndroidNotificationChannel(
+    'crewtalk_messages_novib',
+    '채팅 알림 (진동 끔)',
+    description: '새 메시지 — 소리만',
+    importance: Importance.defaultImportance,
+    playSound: true,
+    enableVibration: false,
+  );
+
+  static const _androidChannelSilentVib = AndroidNotificationChannel(
+    'crewtalk_messages_silent_vib',
+    '채팅 알림 (무음·진동)',
+    description: '새 메시지 — 진동만',
+    importance: Importance.defaultImportance,
+    playSound: false,
+    enableVibration: true,
+  );
+
+  static const _androidChannelQuiet = AndroidNotificationChannel(
+    'crewtalk_messages_quiet',
+    '채팅 알림 (무음)',
+    description: '새 메시지 — 소리·진동 없음',
+    importance: Importance.defaultImportance,
+    playSound: false,
+    enableVibration: false,
   );
 
   static const _androidChannelEmergency = AndroidNotificationChannel(
@@ -67,6 +97,9 @@ class FcmPushService {
 
     final androidPlugin = _local.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
     await androidPlugin?.createNotificationChannel(_androidChannelDefault);
+    await androidPlugin?.createNotificationChannel(_androidChannelNoVib);
+    await androidPlugin?.createNotificationChannel(_androidChannelSilentVib);
+    await androidPlugin?.createNotificationChannel(_androidChannelQuiet);
     await androidPlugin?.createNotificationChannel(_androidChannelEmergency);
 
     if (defaultTargetPlatform == TargetPlatform.iOS || defaultTargetPlatform == TargetPlatform.macOS) {
@@ -140,6 +173,13 @@ class FcmPushService {
     onLocalNotificationTapped?.call(response.payload);
   }
 
+  static AndroidNotificationChannel _androidChannelForPrefs(bool soundOn, bool vibOn) {
+    if (soundOn && vibOn) return _androidChannelDefault;
+    if (soundOn && !vibOn) return _androidChannelNoVib;
+    if (!soundOn && vibOn) return _androidChannelSilentVib;
+    return _androidChannelQuiet;
+  }
+
   static Future<void> _onForegroundMessage(RemoteMessage message) async {
     final n = message.notification;
     final data = message.data;
@@ -161,16 +201,26 @@ class FcmPushService {
       }
     }
 
-    final soundOn = isEmergency || await UserSessionStorage.getMessageNotifSoundEnabled();
-    final vibOn = isEmergency || await UserSessionStorage.getMessageNotifVibrateEnabled();
+    late final bool soundOn;
+    late final bool vibOn;
+    late final AndroidNotificationChannel androidCh;
+    if (isEmergency) {
+      soundOn = true;
+      vibOn = true;
+      androidCh = _androidChannelEmergency;
+    } else {
+      soundOn = await UserSessionStorage.getMessageNotifSoundEnabled();
+      vibOn = await UserSessionStorage.getMessageNotifVibrateEnabled();
+      androidCh = _androidChannelForPrefs(soundOn, vibOn);
+    }
 
     final title = n?.title ?? (isEmergency ? '🚨 긴급' : 'CREW TALK');
     final body = n?.body ?? data['body'] ?? '';
 
     final androidDetails = AndroidNotificationDetails(
-      isEmergency ? _androidChannelEmergency.id : _androidChannelDefault.id,
-      isEmergency ? _androidChannelEmergency.name : _androidChannelDefault.name,
-      channelDescription: isEmergency ? _androidChannelEmergency.description : _androidChannelDefault.description,
+      androidCh.id,
+      androidCh.name,
+      channelDescription: androidCh.description,
       importance: isEmergency ? Importance.max : Importance.defaultImportance,
       priority: isEmergency ? Priority.high : Priority.defaultPriority,
       playSound: soundOn,
@@ -208,12 +258,29 @@ class FcmPushService {
       final token = await _obtainFcmToken(waitForApns: true);
       if (token == null || token.isEmpty) {
         if (kDebugMode) debugPrint('FCM: 토큰 없음 — iOS는 APNs·푸시 capability·Firebase APNs 키·실기기 여부 확인');
-        return;
+      } else {
+        await _saveToken(firebaseUid, token);
+        if (kDebugMode) debugPrint('FCM token saved for uid=$firebaseUid');
       }
-      await _saveToken(firebaseUid, token);
-      if (kDebugMode) debugPrint('FCM token saved for uid=$firebaseUid');
+      await syncMessageNotificationPrefsToFirestore(firebaseUid);
     } catch (e, st) {
       if (kDebugMode) debugPrint('FCM sync error: $e\n$st');
+    }
+  }
+
+  /// `users/{uid}`에 알림 소리·진동 저장 — Cloud Functions FCM이 백그라운드 채널·APNS와 맞춤
+  static Future<void> syncMessageNotificationPrefsToFirestore(String? firebaseUid) async {
+    if (kIsWeb || !AuthRepository.firebaseAvailable) return;
+    if (firebaseUid == null || firebaseUid.isEmpty) return;
+    try {
+      final sound = await UserSessionStorage.getMessageNotifSoundEnabled();
+      final vib = await UserSessionStorage.getMessageNotifVibrateEnabled();
+      await FirebaseFirestore.instance.collection('users').doc(firebaseUid).set({
+        'messageNotifSoundEnabled': sound,
+        'messageNotifVibrateEnabled': vib,
+      }, SetOptions(merge: true));
+    } catch (e, st) {
+      if (kDebugMode) debugPrint('syncMessageNotificationPrefsToFirestore: $e\n$st');
     }
   }
 

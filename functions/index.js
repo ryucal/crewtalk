@@ -340,8 +340,27 @@ function chatMessageBodyPreview(d) {
   return `${name}: 새 메시지`;
 }
 
-async function collectFcmTokensForCompanies(companyNames, senderUserId, roomId) {
-  const tokenSet = new Set();
+/** Android 알림 채널 — 앱 `FcmPushService`와 동일 id */
+function androidChannelIdForChatPrefs(soundOn, vibOn) {
+  if (soundOn && vibOn) return 'crewtalk_messages';
+  if (soundOn && !vibOn) return 'crewtalk_messages_novib';
+  if (!soundOn && vibOn) return 'crewtalk_messages_silent_vib';
+  return 'crewtalk_messages_quiet';
+}
+
+/** iOS: sound 생략 시 무음 푸시(배너는 유지) */
+function apnsPayloadForChat(soundOn) {
+  const aps = { badge: 1, 'content-available': 1 };
+  if (soundOn) aps.sound = 'default';
+  return { payload: { aps }, headers: { 'apns-priority': '10' } };
+}
+
+/**
+ * 일반 채팅 FCM용 — 사용자별 `messageNotifSoundEnabled` / `messageNotifVibrateEnabled`(기본 true)로 버킷 분리
+ * @returns {{ TT: string[], TF: string[], FT: string[], FF: string[] }}
+ */
+async function collectChatFcmBuckets(companyNames, senderUserId, roomId) {
+  const buckets = { TT: new Set(), TF: new Set(), FT: new Set(), FF: new Set() };
   const roomNum = Number(roomId);
   const unique = [...new Set((companyNames || []).map((c) => String(c).trim()).filter(Boolean))];
   for (let i = 0; i < unique.length; i += 10) {
@@ -360,12 +379,20 @@ async function collectFcmTokensForCompanies(companyNames, senderUserId, roomId) 
       if (Array.isArray(muted) && muted.includes(roomNum)) return;
       const arr = data.fcmTokens;
       if (!Array.isArray(arr)) return;
+      const soundOn = data.messageNotifSoundEnabled !== false;
+      const vibOn = data.messageNotifVibrateEnabled !== false;
+      const key = `${soundOn ? 'T' : 'F'}${vibOn ? 'T' : 'F'}`;
       arr.forEach((t) => {
-        if (typeof t === 'string' && t.length > 0) tokenSet.add(t);
+        if (typeof t === 'string' && t.length > 0) buckets[key].add(t);
       });
     });
   }
-  return [...tokenSet];
+  return {
+    TT: [...buckets.TT],
+    TF: [...buckets.TF],
+    FT: [...buckets.FT],
+    FF: [...buckets.FF],
+  };
 }
 
 /**
@@ -515,8 +542,10 @@ exports.onEmergencyMessageCreated = onDocumentCreated(
       return null;
     }
 
-    const tokens = await collectFcmTokensForCompanies(companies, senderUserId, idStr);
-    if (tokens.length === 0) {
+    const buckets = await collectChatFcmBuckets(companies, senderUserId, idStr);
+    const totalTokens =
+      buckets.TT.length + buckets.TF.length + buckets.FT.length + buckets.FF.length;
+    if (totalTokens === 0) {
       logger.info('chat FCM: no tokens for companies', { roomId: idStr });
       return null;
     }
@@ -527,34 +556,44 @@ exports.onEmergencyMessageCreated = onDocumentCreated(
     let success = 0;
     let failure = 0;
 
-    for (let i = 0; i < tokens.length; i += batchSize) {
-      const chunk = tokens.slice(i, i + batchSize);
-      try {
-        const res = await messaging.sendEachForMulticast({
-          tokens: chunk,
-          notification: { title: roomTitle, body },
-          data: { type: 'chat', roomId: idStr, msgType: String(d.type || 'text') },
-          android: {
-            priority: 'high',
-            notification: { channelId: 'crewtalk_messages' },
-          },
-          apns: {
-            payload: { aps: { sound: 'default', badge: 1, 'content-available': 1 } },
-            headers: { 'apns-priority': '10' },
-          },
-        });
-        success += res.successCount;
-        failure += res.failureCount;
-        if (res.failureCount > 0) {
-          removeStaleTokens(res, chunk).catch((e) =>
-            logger.error('chat FCM: stale cleanup error', e));
+    const specs = [
+      { sound: true, vib: true, tokens: buckets.TT },
+      { sound: true, vib: false, tokens: buckets.TF },
+      { sound: false, vib: true, tokens: buckets.FT },
+      { sound: false, vib: false, tokens: buckets.FF },
+    ];
+
+    for (const spec of specs) {
+      const { tokens } = spec;
+      if (tokens.length === 0) continue;
+      const channelId = androidChannelIdForChatPrefs(spec.sound, spec.vib);
+      const apns = apnsPayloadForChat(spec.sound);
+      for (let i = 0; i < tokens.length; i += batchSize) {
+        const chunk = tokens.slice(i, i + batchSize);
+        try {
+          const res = await messaging.sendEachForMulticast({
+            tokens: chunk,
+            notification: { title: roomTitle, body },
+            data: { type: 'chat', roomId: idStr, msgType: String(d.type || 'text') },
+            android: {
+              priority: 'high',
+              notification: { channelId },
+            },
+            apns,
+          });
+          success += res.successCount;
+          failure += res.failureCount;
+          if (res.failureCount > 0) {
+            removeStaleTokens(res, chunk).catch((e) =>
+              logger.error('chat FCM: stale cleanup error', e));
+          }
+        } catch (e) {
+          logger.error('chat FCM: sendEachForMulticast failed', e);
         }
-      } catch (e) {
-        logger.error('chat FCM: sendEachForMulticast failed', e);
       }
     }
 
-    logger.info('chat FCM done', { roomId: idStr, success, failure, tokenCount: tokens.length });
+    logger.info('chat FCM done', { roomId: idStr, success, failure, tokenCount: totalTokens });
     return null;
   },
 );

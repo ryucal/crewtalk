@@ -1,9 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- GPS 권한 -->
+    <!-- GPS 권한 (FGS 기반 포그라운드 위치만 사용) -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
 
     <!-- Foreground Service 권한 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
@@ -17,7 +16,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
     <application
-        android:label="crewtalk"
+        android:label="크루톡"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

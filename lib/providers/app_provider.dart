@@ -6,6 +6,7 @@ import '../models/emergency_contact.dart';
 import '../models/user_model.dart';
 import '../models/room_model.dart';
 import '../models/room_kakao_nav_link.dart';
+import '../models/global_timetable_visibility.dart';
 import '../models/message_model.dart';
 import '../services/auth_repository.dart';
 import '../services/fcm_push_service.dart';
@@ -195,6 +196,20 @@ class RoomNotifier extends StateNotifier<List<RoomModel>> {
 
 final roomProvider = StateNotifierProvider<RoomNotifier, List<RoomModel>>(
   (ref) => RoomNotifier(),
+);
+
+/// `config/timetable_visibility` — 전 방 공통 배차표1·2 헤더 노출 (KST 날짜별)
+class GlobalTimetableVisibilityNotifier extends StateNotifier<GlobalTimetableByDate> {
+  GlobalTimetableVisibilityNotifier() : super({});
+
+  void replace(GlobalTimetableByDate next) => state = Map<String, TimetableDaySlots>.from(next);
+
+  void clear() => state = {};
+}
+
+final globalTimetableVisibilityProvider =
+    StateNotifierProvider<GlobalTimetableVisibilityNotifier, GlobalTimetableByDate>(
+  (ref) => GlobalTimetableVisibilityNotifier(),
 );
 
 // ─── 일반 메시지 (Firebase 미사용 로컬 모드 전용) ─────────────────

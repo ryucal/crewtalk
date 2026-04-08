@@ -183,6 +183,8 @@ Map<String, dynamic> _maintenanceToMap(MaintenanceData m) => {
       'photoUrls': m.photoUrls,
       'specialNote': m.specialNote,
       'status': m.status,
+      'consumableOnly': m.consumableOnly,
+      'consumableItems': m.consumableItems,
     };
 
 MaintenanceData? _maintenanceFromMap(dynamic raw) {
@@ -195,6 +197,14 @@ MaintenanceData? _maintenanceFromMap(dynamic raw) {
       if (e is String && e.trim().isNotEmpty) photos.add(e);
     }
   }
+  final rawItems = m['consumableItems'];
+  final items = <String>[];
+  if (rawItems is List) {
+    for (final e in rawItems) {
+      final s = e.toString();
+      if (MaintenanceData.consumableItemLabelKo.containsKey(s)) items.add(s);
+    }
+  }
   return MaintenanceData(
     car: m['car'] as String? ?? '',
     driverName: m['driverName'] as String? ?? '',
@@ -205,6 +215,8 @@ MaintenanceData? _maintenanceFromMap(dynamic raw) {
     photoUrls: photos,
     specialNote: m['specialNote'] as String? ?? '',
     status: m['status'] as String? ?? '접수',
+    consumableOnly: m['consumableOnly'] as bool? ?? false,
+    consumableItems: items,
   );
 }
 
@@ -274,6 +286,7 @@ class MessageFirestoreCodec {
       'unreported': m.unreported,
       'emoji': m.emoji,
       'noticeForRoomType': roomTypeToWire(m.noticeForRoomType),
+      'isDeleted': m.isDeleted,
     };
   }
 
@@ -290,6 +303,16 @@ class MessageFirestoreCodec {
     final ca = d['createdAt'];
     if (ca is Timestamp) {
       createdAtMs = ca.millisecondsSinceEpoch;
+    }
+    int? deletedAtMs;
+    final da = d['deletedAt'];
+    if (da is Timestamp) {
+      deletedAtMs = da.millisecondsSinceEpoch;
+    }
+    int? editedAtMs;
+    final ea = d['editedAt'];
+    if (ea is Timestamp) {
+      editedAtMs = ea.millisecondsSinceEpoch;
     }
 
     List<String> parsedImgUrls = [];
@@ -340,6 +363,9 @@ class MessageFirestoreCodec {
       unreported: (d['unreported'] as num?)?.toInt(),
       emoji: d['emoji'] as String?,
       noticeForRoomType: roomTypeFromWire(d['noticeForRoomType'] as String?),
+      isDeleted: d['isDeleted'] as bool? ?? false,
+      deletedAtMs: deletedAtMs,
+      editedAtMs: editedAtMs,
     );
   }
 }

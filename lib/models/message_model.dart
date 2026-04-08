@@ -53,17 +53,29 @@ class VendorData {
 
 /// 차량 정비 접수 데이터
 class MaintenanceData {
+  /// 소모품 코드(저장·집계용): `urea`(요소수), `coolant`(부동액), `washer`(워셔액)
+  static const List<String> consumableItemCodesOrdered = ['urea', 'coolant', 'washer'];
+  static const Map<String, String> consumableItemLabelKo = {
+    'urea': '요소수',
+    'coolant': '부동액',
+    'washer': '워셔액',
+  };
+
   final String car;
   final String driverName;
   final String phone;
   final String occurredAt;
   final String symptom;
-  /// '정상 운행 가능' | '조심 운행 가능' | '즉시 점검 필요'
+  /// '정상 운행 가능' | '조심 운행 가능' | '즉시 점검 필요' | 소모품 전용일 때 `소모품 요청`
   final String driveability;
   final List<String> photoUrls;
   final String specialNote;
   /// '접수' | '정비예정' | '정비완료'
   final String status;
+  /// 소모품만 요청하는 메시지(고장 접수 카드 대신 한 줄 버블)
+  final bool consumableOnly;
+  /// [consumableItemCodesOrdered]에 해당하는 코드 목록
+  final List<String> consumableItems;
 
   const MaintenanceData({
     required this.car,
@@ -75,19 +87,41 @@ class MaintenanceData {
     this.photoUrls = const [],
     this.specialNote = '',
     this.status = '접수',
+    this.consumableOnly = false,
+    this.consumableItems = const [],
   });
 
-  MaintenanceData copyWith({String? status}) {
+  /// `김크루.경기 00가 000호. 요소수 요청` / `…. 부동액. 워셔액 요청`
+  String get consumableRequestDisplayLine {
+    if (!consumableOnly || consumableItems.isEmpty) return '';
+    final codes = consumableItems.where(consumableItemLabelKo.containsKey).toList();
+    codes.sort((a, b) => consumableItemCodesOrdered
+        .indexOf(a)
+        .compareTo(consumableItemCodesOrdered.indexOf(b)));
+    final labels = codes.map((c) => consumableItemLabelKo[c]!).toList();
+    if (labels.isEmpty) return '';
+    return '$driverName.$car. ${labels.join('. ')} 요청';
+  }
+
+  MaintenanceData copyWith({
+    String? status,
+    bool? consumableOnly,
+    List<String>? consumableItems,
+    String? symptom,
+    String? driveability,
+  }) {
     return MaintenanceData(
       car: car,
       driverName: driverName,
       phone: phone,
       occurredAt: occurredAt,
-      symptom: symptom,
-      driveability: driveability,
+      symptom: symptom ?? this.symptom,
+      driveability: driveability ?? this.driveability,
       photoUrls: photoUrls,
       specialNote: specialNote,
       status: status ?? this.status,
+      consumableOnly: consumableOnly ?? this.consumableOnly,
+      consumableItems: consumableItems ?? this.consumableItems,
     );
   }
 }
@@ -186,6 +220,13 @@ class MessageModel {
   /// Firestore `createdAt` (읽음 구분선 등 정렬·비교용). 로컬 전용 메시지는 null일 수 있음.
   final int? createdAtMs;
 
+  /// 소프트 삭제 여부
+  final bool isDeleted;
+  /// 삭제 시각 (ms)
+  final int? deletedAtMs;
+  /// 마지막 수정 시각 (ms)
+  final int? editedAtMs;
+
   const MessageModel({
     required this.id,
     required this.userId,
@@ -219,6 +260,9 @@ class MessageModel {
     this.noticeForRoomType,
     this.firestoreDocId,
     this.createdAtMs,
+    this.isDeleted = false,
+    this.deletedAtMs,
+    this.editedAtMs,
   });
 
   /// 말풍선·업로드용 URL 목록 (묶음 또는 단일)
@@ -280,6 +324,8 @@ class MessageModel {
         'photoUrls': maintenanceData!.photoUrls,
         'specialNote': maintenanceData!.specialNote,
         'status': maintenanceData!.status,
+        'consumableOnly': maintenanceData!.consumableOnly,
+        'consumableItems': maintenanceData!.consumableItems,
       },
       if (resultCard != null) 'resultCard': {
         'searchType': resultCard!.searchType,
@@ -310,6 +356,9 @@ class MessageModel {
       'eveningTotal': eveningTotal,
       'unreported': unreported,
       'emoji': emoji,
+      'isDeleted': isDeleted,
+      'deletedAtMs': deletedAtMs,
+      'editedAtMs': editedAtMs,
     };
   }
 
@@ -353,6 +402,14 @@ class MessageModel {
     MaintenanceData? maintenanceData;
     if (j['maintenanceData'] is Map) {
       final md = j['maintenanceData'] as Map<String, dynamic>;
+      final rawItems = md['consumableItems'];
+      final items = <String>[];
+      if (rawItems is List) {
+        for (final e in rawItems) {
+          final s = e.toString();
+          if (MaintenanceData.consumableItemLabelKo.containsKey(s)) items.add(s);
+        }
+      }
       maintenanceData = MaintenanceData(
         car: md['car'] as String? ?? '',
         driverName: md['driverName'] as String? ?? '',
@@ -363,6 +420,8 @@ class MessageModel {
         photoUrls: (md['photoUrls'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? const [],
         specialNote: md['specialNote'] as String? ?? '',
         status: md['status'] as String? ?? '접수',
+        consumableOnly: md['consumableOnly'] as bool? ?? false,
+        consumableItems: items,
       );
     }
 
@@ -466,6 +525,9 @@ class MessageModel {
       noticeForRoomType: noticeForRoomType,
       firestoreDocId: j['firestoreDocId'] as String?,
       createdAtMs: (j['createdAtMs'] as num?)?.toInt(),
+      isDeleted: j['isDeleted'] as bool? ?? false,
+      deletedAtMs: (j['deletedAtMs'] as num?)?.toInt(),
+      editedAtMs: (j['editedAtMs'] as num?)?.toInt(),
     );
   }
 
@@ -480,21 +542,28 @@ class MessageModel {
     String? imageUrl,
     List<String>? imageUrls,
     MaintenanceData? maintenanceData,
+    bool? isDeleted,
+    int? deletedAtMs,
+    int? editedAtMs,
+    String? car,
+    String? route,
+    String? subRoute,
+    ReportData? reportData,
   }) {
     return MessageModel(
       id: id,
       userId: userId,
       name: name,
       avatar: avatar,
-      car: car,
-      route: route,
-      subRoute: subRoute,
+      car: car ?? this.car,
+      route: route ?? this.route,
+      subRoute: subRoute ?? this.subRoute,
       text: text ?? this.text,
       time: time,
       date: date,
       type: type,
       isMe: isMe,
-      reportData: reportData,
+      reportData: reportData ?? this.reportData,
       reactions: reactions ?? this.reactions,
       vendorData: vendorData,
       maintenanceData: maintenanceData ?? this.maintenanceData,
@@ -514,6 +583,9 @@ class MessageModel {
       noticeForRoomType: noticeForRoomType,
       firestoreDocId: firestoreDocId ?? this.firestoreDocId,
       createdAtMs: createdAtMs ?? this.createdAtMs,
+      isDeleted: isDeleted ?? this.isDeleted,
+      deletedAtMs: deletedAtMs ?? this.deletedAtMs,
+      editedAtMs: editedAtMs ?? this.editedAtMs,
     );
   }
 }
